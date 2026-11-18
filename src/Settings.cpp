@@ -1066,6 +1066,12 @@ static const char* gEnumSettingsDocumentColorsFollowTheme[] = {"off", "smart", "
 static const char* gEnumSettingsEngineeringDrawingEnhance[] = {"off", "auto", "on", nullptr};
 static const char* gEnumSettingsTranslateEngine[] = {
     "", "Google", "DeepL", "Grok Build", "Claude Code", "OpenAI Codex", "Antigravity", nullptr};
+static const char* gEnumSettingsTranslatePopupThinking[] = {"default", "off", "low", "medium", "high", "max", nullptr};
+static const char* gEnumSettingsTranslatePopupLangFrom[] = {"auto", "zh-CN", "zh-TW", "en", "ja", "ko", "fr",   "de",
+                                                            "es",   "it",    "pt",    "ru", "ar", "hi", nullptr};
+static const char* gEnumSettingsTranslatePopupLangTo[] = {"zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de",
+                                                          "es",    "it",    "pt", "ru", "ar", "hi", nullptr};
+static const char* gEnumSettingsTranslatePopupPosition[] = {"auto", "top", "bottom", "left", "right", nullptr};
 static const FieldInfo gSettingsFields[] = {
     {(size_t)-1, SettingType::Comment,
      (intptr_t)"For documentation, see https://www.sumatrapdfreader.org/settings/settings3-7.html"},
@@ -1232,6 +1238,30 @@ static const FieldInfo gSettingsFields[] = {
     {offsetof(Settings, translateEngine), SettingType::String, (intptr_t)"", true, false, gEnumSettingsTranslateEngine,
      "the first available engine"},
     {(size_t)-1, SettingType::Comment, 0},
+    {offsetof(Settings, translatePopupEnabled), SettingType::Bool, true},
+    {offsetof(Settings, translatePopupUrl), SettingType::String, (intptr_t)""},
+    {offsetof(Settings, translatePopupModel), SettingType::String, (intptr_t)""},
+    {offsetof(Settings, translatePopupApiKey), SettingType::String, (intptr_t)"", false, true},
+    {offsetof(Settings, translatePopupTemperature), SettingType::Float, (intptr_t)"1"},
+    {offsetof(Settings, translatePopupPrompt), SettingType::String, (intptr_t)""},
+    {offsetof(Settings, translatePopupStream), SettingType::Bool, true},
+    {offsetof(Settings, translatePopupThinking), SettingType::String, (intptr_t)"off", false, false,
+     gEnumSettingsTranslatePopupThinking, nullptr},
+    {offsetof(Settings, translatePopupLangFrom), SettingType::String, (intptr_t)"auto", false, false,
+     gEnumSettingsTranslatePopupLangFrom, nullptr},
+    {offsetof(Settings, translatePopupLangTo), SettingType::String, (intptr_t)"zh-CN", false, false,
+     gEnumSettingsTranslatePopupLangTo, nullptr},
+    {offsetof(Settings, translatePopupCustomParams), SettingType::String, (intptr_t)"{}", false, true},
+    {offsetof(Settings, translatePopupFont), SettingType::String, (intptr_t)"Microsoft YaHei UI"},
+    {offsetof(Settings, translatePopupFontSize), SettingType::Int, 11},
+    {offsetof(Settings, translatePopupBold), SettingType::Bool, false},
+    {offsetof(Settings, translatePopupAutoSize), SettingType::Bool, true},
+    {offsetof(Settings, translatePopupWidth), SettingType::Int, 460},
+    {offsetof(Settings, translatePopupHeight), SettingType::Int, 350},
+    {offsetof(Settings, translatePopupMaxHeight), SettingType::Int, 70},
+    {offsetof(Settings, translatePopupPosition), SettingType::String, (intptr_t)"auto", false, false,
+     gEnumSettingsTranslatePopupPosition, nullptr},
+    {(size_t)-1, SettingType::Comment, 0},
     {offsetof(Settings, annotations), SettingType::Struct, (intptr_t)&gAnnotationsInfo},
     {(size_t)-1, SettingType::Comment, 0},
     {offsetof(Settings, externalViewers), SettingType::Array, (intptr_t)&gExternalViewerInfo},
@@ -1299,11 +1329,15 @@ const StructInfo gSettingsInfo = {
     "\0DisableAntiAlias\0EngineeringDrawingEnhance\0DisableAutoLinks\0UseSysColors\0UseTabs\0ShowCaption\0SelectionTool"
     "bar\0SelectionToolbarLayout\0TabsMru\0CtrlTabSimple\0ZoomLevels\0ZoomIncrement\0FitWidthPercent\0\0FixedPageUI\0\0"
     "EBookUI\0\0ComicBookUI\0\0ImageUI\0\0ChmUI\0\0MarkdownUI\0\0HtmlUI\0\0ClaudeCode\0\0GrokBuild\0\0CodexBuild\0\0Ant"
-    "iGravity\0\0CustomAI\0\0AIChat\0\0AIChatSidebarDx\0\0TranslateToLang\0TranslateFromLang\0TranslateEngine\0\0Annota"
-    "tions\0\0ExternalViewers\0\0ForwardSearch\0\0PrinterDefaults\0\0Fullscreen\0\0SelectionHandlers\0\0TextSnippets\0"
-    "\0Shortcuts\0\0Themes\0\0TabGroups\0\0CustomScreenDPI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowStat"
-    "e\0WindowPos\0SearchUIWindowPos\0AnnotationsWindowShowNote\0HelpWindowPos\0FileStates\0SessionData\0ReopenOnce\0Ti"
-    "meOfLastUpdateCheck\0OpenCountWeek\0PropWinPos\0CheckForUpdates\0OnlineApiKey\0OnlineServer\0\0",
+    "iGravity\0\0CustomAI\0\0AIChat\0\0AIChatSidebarDx\0\0TranslateToLang\0TranslateFromLang\0TranslateEngine\0\0Transl"
+    "atePopupEnabled\0TranslatePopupUrl\0TranslatePopupModel\0TranslatePopupApiKey\0TranslatePopupTemperature\0Translat"
+    "ePopupPrompt\0TranslatePopupStream\0TranslatePopupThinking\0TranslatePopupLangFrom\0TranslatePopupLangTo\0Translat"
+    "ePopupCustomParams\0TranslatePopupFont\0TranslatePopupFontSize\0TranslatePopupBold\0TranslatePopupAutoSize\0Transl"
+    "atePopupWidth\0TranslatePopupHeight\0TranslatePopupMaxHeight\0TranslatePopupPosition\0\0Annotations\0\0ExternalVie"
+    "wers\0\0ForwardSearch\0\0PrinterDefaults\0\0Fullscreen\0\0SelectionHandlers\0\0TextSnippets\0\0Shortcuts\0\0Themes"
+    "\0\0TabGroups\0\0CustomScreenDPI\0\0\0DefaultPasswords\0UiLanguage\0VersionToSkip\0WindowState\0WindowPos\0SearchU"
+    "IWindowPos\0AnnotationsWindowShowNote\0HelpWindowPos\0FileStates\0SessionData\0ReopenOnce\0TimeOfLastUpdateCheck\0"
+    "OpenCountWeek\0PropWinPos\0CheckForUpdates\0OnlineApiKey\0OnlineServer\0\0",
     "\0\0default layout of pages. page aspect (3.7+): first open of a PDF, XPS, DjVu or PostScript file uses page 1 — "
     "taller than wide is continuous + fit width, wider than tall is single page + fit page; a remembered FileState "
     "still wins\0default zoom. valid values: fit page, fit width, fit height, fit content, fit visible or percent like "
@@ -1469,8 +1503,16 @@ const StructInfo gSettingsInfo = {
     "default); shared by Claude Code, Grok Build, and OpenAI Codex (internal)\0\0remembered destination language for "
     "selection translation; empty uses OS UI language\0remembered source language for selection translation; empty "
     "means Auto\0remembered engine for Translate Selection: Google, DeepL, Grok Build, Claude Code, OpenAI Codex or "
-    "Antigravity\0\0default values for annotations in PDF documents\0\0list of additional external viewers for various "
-    "file types. See [docs for more "
+    "Antigravity\0\0show a translation popup after selecting text\0full Chat Completions or Responses endpoint for the "
+    "translation popup\0model used by the translation popup\0API key used by the translation popup\0translation "
+    "temperature from 0 to 2\0translation prompt template; empty uses the built-in template\0show translation text as "
+    "it arrives\0translation model reasoning mode\0source language for the translation popup\0target language for the "
+    "translation popup\0JSON object of request overrides for the translation popup\0font family used only for "
+    "translation text\0translation text size in points, from 8 to 32\0use bold font weight for translation text\0fit "
+    "translation popup height to its text\0translation reading or manual width in 96-DPI units, from 330 to "
+    "1600\0manual translation popup height in 96-DPI units, from 180 to 1200\0automatic height limit as percent of "
+    "monitor work area, from 30 to 90\0preferred side of the selection for the translation popup\0\0default values for "
+    "annotations in PDF documents\0\0list of additional external viewers for various file types. See [docs for more "
     "information](https://www.sumatrapdfreader.org/docs/Customize-external-viewers)\0\0customization options for how "
     "forward search results are shown (used from LaTeX editors)\0\0these override the default settings in the Print "
     "dialog\0\0options for fullscreen mode\0\0list of handlers for selected text, shown in context menu when text "
@@ -1493,7 +1535,7 @@ const StructInfo gSettingsInfo = {
     "Set from File / Link SumatraPDF Web. Do not share the settings file.\0an empty value means the public SumatraPDF "
     "Web site. The dialog does not edit it.\0\0Settings below are not recognized by the current version",
     false};
-static_assert(dimof(gSettingsFields) == 193);
+static_assert(dimof(gSettingsFields) == 213);
 static const FieldInfo gTheme_1_Fields[] = {
     {offsetof(Theme, name), SettingType::String, (intptr_t)""},
     {offsetof(Theme, textColor), SettingType::Color, (intptr_t)""},

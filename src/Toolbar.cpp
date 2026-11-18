@@ -53,6 +53,7 @@
 #include "SvgIcons.h"
 #include "Theme.h"
 #include "ReadAloud.h"
+#include "TranslatePopup.h"
 #include "Toolbar.h"
 #include "ToolbarCommon.h"
 
@@ -591,6 +592,7 @@ static void SetOverlayShown(MainWindow* win, bool shown) {
     }
     win->toolbarOverlayShown = shown;
     PositionOverlayToolbar(win);
+    UpdateTranslatePopup(win);
 }
 
 // re-evaluate overlay toolbar visibility based on the cursor's screen position

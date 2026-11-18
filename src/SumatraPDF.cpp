@@ -95,6 +95,7 @@
 #include "SelectTextKeyboard.h"
 #include "KeyboardHelp.h"
 #include "SelectionToolbar.h"
+#include "TranslatePopup.h"
 #include "AnnotEditToolbar.h"
 #include "AnnotFilterToolbar.h"
 #include "ScreenshotCapture.h"
@@ -8633,6 +8634,7 @@ static bool FrameOnKeydown(MainWindow* win, WPARAM key, LPARAM lp) {
     }
 
     if (VK_ESCAPE == key) {
+        DismissTranslatePopup(win);
         CancelDrag(win);
         // and leave a selected annotation's edit mode (issue #5933)
         WindowTab* tabEsc = win->CurrentTab();
@@ -8698,6 +8700,7 @@ static WCHAR SingleCharLowerW(WCHAR c) {
 }
 
 static void OnFrameKeyEsc(MainWindow* win) {
+    DismissTranslatePopup(win);
     if (win->isQuickLook) {
         CloseWindow(win, true, false);
         return;
@@ -13809,9 +13812,11 @@ static void UpdateCaptionOverlay(MainWindow* win, CaptionUpdate update) {
                          SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         }
         HwndInvalidate(win->hwndCaptionOverlay);
+        if (update == CaptionUpdate::Mouse) UpdateTranslatePopup(win);
         return;
     }
     ShowWindow(win->hwndCaptionOverlay, SW_HIDE);
+    if (update == CaptionUpdate::Mouse) UpdateTranslatePopup(win);
     if (!gSettings->showCaption) {
         win->captionRect = {};
         if (win->tabsCtrl) {
@@ -13967,6 +13972,7 @@ void UpdateSidebarOverlay(MainWindow* win, SidebarOverlayUpdate update) {
         win->sidebarOverlayByMouse = byMouse;
         win->sidebarOverlayShown = true;
         PlaceSidebarOverlay(win);
+        if (update != SidebarOverlayUpdate::Layout) UpdateTranslatePopup(win);
         return;
     }
 
@@ -13984,6 +13990,7 @@ void UpdateSidebarOverlay(MainWindow* win, SidebarOverlayUpdate update) {
         HwndSetFocus(win->hwndCanvas);
     }
     PlaceSidebarOverlay(win);
+    if (update != SidebarOverlayUpdate::Layout) UpdateTranslatePopup(win);
 }
 
 HWND gLastActiveFrameHwnd = nullptr;
@@ -14159,6 +14166,7 @@ static LRESULT CALLBACK WndProcSumatraFrame(HWND hwnd, UINT msg, WPARAM wp, LPAR
             if (win) {
                 RememberDefaultWindowPosition(win);
                 win->NotifyWindowMoved();
+                UpdateTranslatePopup(win);
             }
             break;
 
@@ -15076,6 +15084,7 @@ static bool MaybeTranslateAccelerator(MSG& msg) {
     if (!doAccels) {
         return false;
     }
+    if (TranslatePopupKey(msg)) return true;
 
     if (msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP) {
         if (gIgnoreRepeatKey && msg.wParam == gIgnoreRepeatKey) {

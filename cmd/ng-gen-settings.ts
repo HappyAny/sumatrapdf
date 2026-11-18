@@ -2274,6 +2274,47 @@ const globalPrefs: Field[] = [
     .internal()
     .ver("3.7"),
   emptyLine(),
+  field("TranslatePopupEnabled", Bool, true, "show a translation popup after selecting text").ver("3.7"),
+  field("TranslatePopupUrl", Str, "", "full Chat Completions or Responses endpoint for the translation popup").ver(
+    "3.7",
+  ),
+  field("TranslatePopupModel", Str, "", "model used by the translation popup").ver("3.7"),
+  field("TranslatePopupApiKey", Str, "", "API key used by the translation popup").secret().ver("3.7"),
+  field("TranslatePopupTemperature", Float, 1, "translation temperature from 0 to 2").ver("3.7"),
+  field("TranslatePopupPrompt", Str, "", "translation prompt template; empty uses the built-in template").ver("3.7"),
+  field("TranslatePopupStream", Bool, true, "show translation text as it arrives").ver("3.7"),
+  field("TranslatePopupThinking", Str, "off", "translation model reasoning mode")
+    .enum(["default", "off", "low", "medium", "high", "max"])
+    .ver("3.7"),
+  field("TranslatePopupLangFrom", Str, "auto", "source language for the translation popup")
+    .enum(["auto", "zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "it", "pt", "ru", "ar", "hi"])
+    .ver("3.7"),
+  field("TranslatePopupLangTo", Str, "zh-CN", "target language for the translation popup")
+    .enum(["zh-CN", "zh-TW", "en", "ja", "ko", "fr", "de", "es", "it", "pt", "ru", "ar", "hi"])
+    .ver("3.7"),
+  field("TranslatePopupCustomParams", Str, "{}", "JSON object of request overrides for the translation popup")
+    .secret()
+    .ver("3.7"),
+  field("TranslatePopupFont", Str, "Microsoft YaHei UI", "font family used only for translation text").ver("3.7"),
+  field("TranslatePopupFontSize", Int, 11, "translation text size in points, from 8 to 32").ver("3.7"),
+  field("TranslatePopupBold", Bool, false, "use bold font weight for translation text").ver("3.7"),
+  field("TranslatePopupAutoSize", Bool, true, "fit translation popup height to its text").ver("3.7"),
+  field("TranslatePopupWidth", Int, 460, "translation reading or manual width in 96-DPI units, from 330 to 1600").ver(
+    "3.7",
+  ),
+  field("TranslatePopupHeight", Int, 350, "manual translation popup height in 96-DPI units, from 180 to 1200").ver(
+    "3.7",
+  ),
+  field(
+    "TranslatePopupMaxHeight",
+    Int,
+    70,
+    "automatic height limit as percent of monitor work area, from 30 to 90",
+  ).ver("3.7"),
+  field("TranslatePopupPosition", Str, "auto", "preferred side of the selection for the translation popup")
+    .enum(["auto", "top", "bottom", "left", "right"])
+    .ver("3.7"),
+  emptyLine(),
   struct("Annotations", annotations, "default values for annotations in PDF documents").ver("3.3"),
   emptyLine(),
   array(
@@ -2441,6 +2482,25 @@ const globalPrefsLayout = [
   "TranslateToLang",
   "TranslateFromLang",
   "TranslateEngine",
+  "TranslatePopupEnabled",
+  "TranslatePopupUrl",
+  "TranslatePopupModel",
+  "TranslatePopupApiKey",
+  "TranslatePopupTemperature",
+  "TranslatePopupPrompt",
+  "TranslatePopupStream",
+  "TranslatePopupThinking",
+  "TranslatePopupLangFrom",
+  "TranslatePopupLangTo",
+  "TranslatePopupCustomParams",
+  "TranslatePopupFont",
+  "TranslatePopupFontSize",
+  "TranslatePopupBold",
+  "TranslatePopupAutoSize",
+  "TranslatePopupWidth",
+  "TranslatePopupHeight",
+  "TranslatePopupMaxHeight",
+  "TranslatePopupPosition",
   "UiLanguage",
   "VersionToSkip",
   "ChmUI",

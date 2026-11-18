@@ -23,6 +23,10 @@ void ResetSelectionToolbarDismissed(MainWindow* win);
 void RefreshSelectionToolbarIcons(MainWindow* win);
 void DeleteSelectionToolbar(MainWindow* win);
 bool IsSelectionToolbarVisible(MainWindow* win);
+#ifndef SUMATRA_NG
+Rect SelectionToolbarRect(MainWindow* win);
+void AvoidSelectionToolbarCover(MainWindow* win, Rect popup);
+#endif
 gpui::El* SelectionToolbarBuild(MainWindow* win, gpui::Ctx* cx);
 TempStr SelectionToolbarLayoutDumpTemp();
 TempStr SelectionToolbarLayoutDumpTemp(MainWindow* win);

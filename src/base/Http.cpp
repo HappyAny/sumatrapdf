@@ -847,11 +847,15 @@ bool HttpPostStream(Str url, Str headers, Str body, HttpStreamSink* sink, HttpSt
                 char bytes[4096];
                 DWORD received;
                 while (!sink->IsCanceled()) {
-                    if (!WinHttpReadData(request, bytes, sizeof(bytes), &received)) break;
-                    if (received == 0) {
+                    DWORD available = 0;
+                    if (!WinHttpQueryDataAvailable(request, &available)) break;
+                    if (available == 0) {
                         ok = true;
                         break;
                     }
+                    // A full-buffer read delays small SSE events until more data or EOF.
+                    DWORD want = std::min(available, (DWORD)sizeof(bytes));
+                    if (!WinHttpReadData(request, bytes, want, &received) || received == 0) break;
                     if (!sink->OnData(Str(bytes, (int)received))) break;
                 }
             }

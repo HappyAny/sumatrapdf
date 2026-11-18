@@ -1054,6 +1054,47 @@ struct Settings {
     // remembered engine for Translate Selection: Google, DeepL, Grok
     // Build, Claude Code, OpenAI Codex or Antigravity
     Str translateEngine;
+    // show a translation popup after selecting text
+    bool translatePopupEnabled;
+    // full Chat Completions or Responses endpoint for the translation
+    // popup
+    Str translatePopupUrl;
+    // model used by the translation popup
+    Str translatePopupModel;
+    // API key used by the translation popup
+    Str translatePopupApiKey;
+    // translation temperature from 0 to 2
+    float translatePopupTemperature;
+    // translation prompt template; empty uses the built-in template
+    Str translatePopupPrompt;
+    // show translation text as it arrives
+    bool translatePopupStream;
+    // translation model reasoning mode
+    Str translatePopupThinking;
+    // source language for the translation popup
+    Str translatePopupLangFrom;
+    // target language for the translation popup
+    Str translatePopupLangTo;
+    // JSON object of request overrides for the translation popup
+    Str translatePopupCustomParams;
+    // font family used only for translation text
+    Str translatePopupFont;
+    // translation text size in points, from 8 to 32
+    int translatePopupFontSize;
+    // use bold font weight for translation text
+    bool translatePopupBold;
+    // fit translation popup height to its text
+    bool translatePopupAutoSize;
+    // translation reading or manual width in 96-DPI units, from 330 to
+    // 1600
+    int translatePopupWidth;
+    // manual translation popup height in 96-DPI units, from 180 to 1200
+    int translatePopupHeight;
+    // automatic height limit as percent of monitor work area, from 30 to
+    // 90
+    int translatePopupMaxHeight;
+    // preferred side of the selection for the translation popup
+    Str translatePopupPosition;
     // ISO code of the current UI language
     Str uiLanguage;
     // SumatraPDF won't offer to update to this version again

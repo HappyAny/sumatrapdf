@@ -1403,6 +1403,8 @@
     <ClInclude Include="..\src\ImageSaveCropResize.h" />
     <ClInclude Include="..\src\Installer.h" />
     <ClInclude Include="..\src\LayersUI.h" />
+    <ClInclude Include="..\src\LlmRequestOptions.h" />
+    <ClInclude Include="..\src\LlmTranslate.h" />
     <ClInclude Include="..\src\MainWindow.h" />
     <ClInclude Include="..\src\MeasurementToolbar.h" />
     <ClInclude Include="..\src\Menu.h" />
@@ -1422,6 +1424,9 @@
     <ClInclude Include="..\src\SumatraDialogs.h" />
     <ClInclude Include="..\src\SumatraPDF.h" />
     <ClInclude Include="..\src\Toolbar.h" />
+    <ClInclude Include="..\src\TranslateAnchor.h" />
+    <ClInclude Include="..\src\TranslateParams.h" />
+    <ClInclude Include="..\src\TranslatePopup.h" />
     <ClInclude Include="..\src\base\Archive.h" />
     <ClInclude Include="..\src\base\CrashHandler.h" />
     <ClInclude Include="..\src\base\tests\UtAssert.h" />
@@ -1678,6 +1683,8 @@
     <ClCompile Include="..\src\InverseSearchDialog.cpp" />
     <ClCompile Include="..\src\KeyboardHelp.cpp" />
     <ClCompile Include="..\src\LayersUI.cpp" />
+    <ClCompile Include="..\src\LlmRequestOptions.cpp" />
+    <ClCompile Include="..\src\LlmTranslate.cpp" />
     <ClCompile Include="..\src\MainWindow.cpp" />
     <ClCompile Include="..\src\MeasurementToolbar.cpp" />
     <ClCompile Include="..\src\Menu.cpp" />
@@ -1734,6 +1741,9 @@
     <ClCompile Include="..\src\Tests.cpp" />
     <ClCompile Include="..\src\TextViewWnd.cpp" />
     <ClCompile Include="..\src\Toolbar.cpp" />
+    <ClCompile Include="..\src\TranslateAnchor.cpp" />
+    <ClCompile Include="..\src\TranslateParams.cpp" />
+    <ClCompile Include="..\src\TranslatePopup.cpp" />
     <ClCompile Include="..\src\Uninstaller.cpp" />
     <ClCompile Include="..\src\UpdateCheck.cpp" />
     <ClCompile Include="..\src\base\Archive.cpp">

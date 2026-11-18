@@ -135,6 +135,12 @@
     <ClInclude Include="..\src\LayersUI.h">
       <Filter>src</Filter>
     </ClInclude>
+    <ClInclude Include="..\src\LlmRequestOptions.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\LlmTranslate.h">
+      <Filter>src</Filter>
+    </ClInclude>
     <ClInclude Include="..\src\MainWindow.h">
       <Filter>src</Filter>
     </ClInclude>
@@ -190,6 +196,15 @@
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\Toolbar.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\TranslateAnchor.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\TranslateParams.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="..\src\TranslatePopup.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="..\src\base\Archive.h">
@@ -872,6 +887,12 @@
     <ClCompile Include="..\src\LayersUI.cpp">
       <Filter>src</Filter>
     </ClCompile>
+    <ClCompile Include="..\src\LlmRequestOptions.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\LlmTranslate.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
     <ClCompile Include="..\src\MainWindow.cpp">
       <Filter>src</Filter>
     </ClCompile>
@@ -1002,6 +1023,15 @@
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Toolbar.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TranslateAnchor.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TranslateParams.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="..\src\TranslatePopup.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="..\src\Uninstaller.cpp">

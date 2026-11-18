@@ -173,6 +173,7 @@ export enum ControlCommand {
   WaitHomePainted = 163,
   // [idx]: select tab idx; idx < 0 only reports the current tab and count
   TestSelectTab = 164,
+  TestTranslatePopup = 165,
 }
 
 export type ControlArg = number | string | Uint8Array | ControlArg[];

@@ -54,6 +54,7 @@
 #include "LinkFollow.h"
 #include "SelectTextKeyboard.h"
 #include "SelectionToolbar.h"
+#include "TranslatePopup.h"
 #include "HomePage.h"
 #include "Notifications.h"
 #include "AIChatCommon.h"
@@ -699,6 +700,7 @@ enum class ControlCmd : u16 {
     WaitHomePainted = 163,
     // [idx]: select tab idx; idx < 0 only reports the current tab and count
     TestSelectTab = 164,
+    TestTranslatePopup = 165,
 };
 
 static_assert((u16)ControlCmd::Quit == (u16)ControlFrameCmd::Quit);
@@ -1582,6 +1584,21 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 break;
             }
             AppendTestResult(req, 0, SelectionToolbarLayoutDumpTemp());
+            break;
+        }
+
+        case ControlCmd::TestTranslatePopup: {
+            if (len(gWindows) == 0 || !gWindows[0]) {
+                AppendTestResult(req, 2, StrL("NOTREADY no-window"));
+                break;
+            }
+            MainWindow* win = gWindows[0];
+            Str action = StringArg(req, 0);
+            if (action && !TranslatePopupAction(win, action)) {
+                AppendTestResult(req, 1, StrL("Unknown or unavailable translation popup action"));
+                break;
+            }
+            AppendTestResult(req, 0, TranslatePopupStateTemp(win));
             break;
         }
 

@@ -35,6 +35,7 @@
 #include "SvgIcons.h"
 #include "Toolbar.h"
 #include "Notifications.h"
+#include "TranslatePopup.h"
 #include "SelectionToolbar.h"
 #include "SelectionToolbarCommon.h"
 
@@ -55,6 +56,7 @@ struct SelectionToolbar {
     Rect lastPlaced;    // last screen rect we moved the window to (avoids redundant SetWindowPos)
     Rect lastSelBounds; // last canvas-space selection bounds used for placement
     DWORD lastPositionUpdateTick = 0;
+    bool coveredByTranslation = false;
     Vec<SelectionToolbarButton> buttons;
     Func1List<MainWindow*> onWindowMoved;
 };
@@ -194,6 +196,7 @@ static VirtCtrl* MakeSelectionToolbarSeparator(int rowDy) {
 }
 
 static bool GetSelectionEndPoint(MainWindow* win, Point& out);
+static void HideToolbarWindow(MainWindow* win);
 
 // The toolbar has done its job once an action is picked, so hide it until the
 // selection changes. Sticky-note placement records the selection end first,
@@ -211,8 +214,9 @@ void InvokeSelectionToolbarCommand(MainWindow* win, int cmdId) {
         }
         DeleteOldSelectionInfo(win, true);
     }
-    HideSelectionToolbar(win);
+    HideToolbarWindow(win);
     win->selectionToolbarDismissed = true;
+    UpdateTranslatePopup(win);
 
     if (cmdId != CmdCopySelection) {
         HwndPostCommand(win->hwndFrame, cmdId, commandPoint);
@@ -326,6 +330,26 @@ static void PaintToolbar(SelectionToolbar*, VirtHostPaintEvent* ev) {
 bool IsSelectionToolbarVisible(MainWindow* win) {
     SelectionToolbar* tb = win ? win->selectionToolbar : nullptr;
     return tb && tb->host && tb->host->IsVisible();
+}
+
+Rect SelectionToolbarRect(MainWindow* win) {
+    SelectionToolbar* tb = win ? win->selectionToolbar : nullptr;
+    if (!tb || !tb->tab || !IsCurrentTab(win, tb->tab)) return {};
+    return tb->lastPlaced;
+}
+
+void AvoidSelectionToolbarCover(MainWindow* win, Rect popup) {
+    Rect toolbar = SelectionToolbarRect(win);
+    if (toolbar.IsEmpty()) return;
+    SelectionToolbar* tb = win->selectionToolbar;
+    bool covered = !toolbar.Intersect(popup).IsEmpty();
+    if (tb->coveredByTranslation == covered) return;
+    tb->coveredByTranslation = covered;
+    tb->host->Show(!covered);
+    if (covered && tb->host->vroot) {
+        tb->host->vroot->ClearHover();
+        tb->host->vroot->ClearPressed();
+    }
 }
 
 // the part of the canvas a selection can show in
@@ -455,7 +479,7 @@ TempStr SelectionToolbarLayoutDumpTemp() {
 // nothing if the feature is disabled (Annotations.SelectionToolbar) or there
 // is no on-screen text selection in a fixed-page document.
 static void ShowSelectionToolbarNow(MainWindow* win) {
-    if (!win || !gSettings->selectionToolbar) {
+    if (!win || !gSettings->selectionToolbar || win->selectionToolbarDismissed) {
         return;
     }
     // Do not check IsActivelySelecting here: OnSelectionStop schedules the show
@@ -478,18 +502,19 @@ static void ShowSelectionToolbarNow(MainWindow* win) {
     if (!tb) {
         return;
     }
-    tb->tab = win->CurrentTab();
     tb->lastPositionUpdateTick = GetTickCount();
     tb->lastSelBounds = sel;
     InitButtons(tb->buttons, win);
     if (len(tb->buttons) == 0) {
         return;
     }
+    tb->tab = win->CurrentTab();
     LayoutToolbar(tb);
     // Force SetWindowPos + region even if lastPlaced matched (e.g. after hide).
     tb->lastPlaced = Rect();
     PositionToolbar(tb, sel);
-    tb->host->Show(true);
+    UpdateTranslatePopup(win);
+    tb->host->Show(!tb->coveredByTranslation);
     tb->host->Invalidate(false);
 }
 
@@ -511,18 +536,16 @@ static void CancelPendingShow(MainWindow* win) {
 // of pushing it back, so a stream of canvas repaints (UpdateSelectionToolbarPosition
 // asks on every one) can't starve the timer.
 void ShowSelectionToolbar(MainWindow* win, SelToolbarShow when) {
-    if (!win || !win->hwndCanvas || !gSettings->selectionToolbar) {
-        return;
-    }
-    if (win->selectionToolbar && win->selectionToolbarDismissed) {
+    if (!win || !win->hwndCanvas) {
         return;
     }
     if (when == SelToolbarShow::Now) {
         CancelPendingShow(win);
         ShowSelectionToolbarNow(win);
+        ShowTranslatePopup(win);
         return;
     }
-    if (win->selectionToolbarShowPending) {
+    if (!gSettings->selectionToolbar || win->selectionToolbarDismissed || win->selectionToolbarShowPending) {
         return;
     }
     win->selectionToolbarShowPending = true;
@@ -546,27 +569,21 @@ void SelectionToolbarOnShowTimer(MainWindow* win) {
 // Reposition the toolbar so it keeps following the selection (called from the
 // canvas paint routine). Hides it if the selection scrolled out of view or the
 // current tab changed; re-shows it after e.g. a repaint restored the selection.
-void UpdateSelectionToolbarPosition(MainWindow* win) {
-    if (!win) {
-        return;
-    }
+static void UpdateToolbarPosition(MainWindow* win) {
     // Hide during drag so the bar does not chase the rubber-band selection.
-    if (IsActivelySelecting(win)) {
-        SelectionToolbar* activeTb = win->selectionToolbar;
-        if (activeTb && activeTb->host && activeTb->host->IsVisible()) {
-            HideSelectionToolbar(win);
-        }
+    SelectionToolbar* tb = win->selectionToolbar;
+    if (!gSettings->selectionToolbar || IsActivelySelecting(win)) {
+        if (tb && tb->tab) HideToolbarWindow(win);
         return;
     }
-    SelectionToolbar* tb = win->selectionToolbar;
-    if (!tb || !tb->host || !tb->host->IsVisible()) {
+    if (!tb || !tb->tab) {
         if (win->showSelection) {
             ShowSelectionToolbar(win, SelToolbarShow::Settled);
         }
         return;
     }
     if (!IsCurrentTab(win, tb->tab)) {
-        HideSelectionToolbar(win);
+        HideToolbarWindow(win);
         if (win->showSelection) {
             ShowSelectionToolbar(win, SelToolbarShow::Settled);
         }
@@ -574,7 +591,7 @@ void UpdateSelectionToolbarPosition(MainWindow* win) {
     }
     Rect sel;
     if (!GetSelectionBounds(win, sel)) {
-        HideSelectionToolbar(win);
+        HideToolbarWindow(win);
         return;
     }
     // Canvas-space bounds are unchanged on a frame move (and on many canvas
@@ -601,6 +618,12 @@ void UpdateSelectionToolbarPosition(MainWindow* win) {
     }
 }
 
+void UpdateSelectionToolbarPosition(MainWindow* win) {
+    if (!win) return;
+    UpdateToolbarPosition(win);
+    UpdateTranslatePopup(win);
+}
+
 // Keep the popup on the selection when the frame moves. Canvas-space bounds
 // do not change, and a move typically does not paint the canvas, so the
 // paint-path update never runs; onWindowMoved (and layout/DPI) call this instead.
@@ -609,14 +632,9 @@ void RepositionSelectionToolbar(MainWindow* win) {
         return;
     }
     SelectionToolbar* tb = win->selectionToolbar;
-    if (!tb || !tb->host || !tb->host->IsVisible()) {
-        return;
-    }
     Rect sel;
-    if (!GetSelectionBounds(win, sel)) {
-        return;
-    }
-    PositionToolbar(tb, sel);
+    if (tb && tb->tab && IsCurrentTab(win, tb->tab) && GetSelectionBounds(win, sel)) PositionToolbar(tb, sel);
+    UpdateTranslatePopup(win);
 }
 
 void RefreshSelectionToolbarIcons(MainWindow* win) {
@@ -629,7 +647,7 @@ void RefreshSelectionToolbarIcons(MainWindow* win) {
 }
 
 // Hide the toolbar but keep the window around for reuse.
-void HideSelectionToolbar(MainWindow* win) {
+static void HideToolbarWindow(MainWindow* win) {
     CancelPendingShow(win);
     SelectionToolbar* tb = win ? win->selectionToolbar : nullptr;
     if (!tb || !tb->host) {
@@ -644,12 +662,19 @@ void HideSelectionToolbar(MainWindow* win) {
         tb->host->vroot->ClearPressed();
     }
     tb->tab = nullptr;
+    tb->coveredByTranslation = false;
     tb->lastPlaced = Rect();
     tb->lastSelBounds = Rect();
 }
 
+void HideSelectionToolbar(MainWindow* win) {
+    HideToolbarWindow(win);
+    HideTranslatePopup(win);
+}
+
 // Destroy the toolbar window and free its state.
 void DeleteSelectionToolbar(MainWindow* win) {
+    DeleteTranslatePopup(win);
     CancelPendingShow(win);
     SelectionToolbar* tb = win ? win->selectionToolbar : nullptr;
     if (!tb) {
