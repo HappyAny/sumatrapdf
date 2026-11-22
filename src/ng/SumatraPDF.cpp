@@ -83,12 +83,14 @@
 #include "gui/OleDragDrop.h"
 #include "gui/NativeCursors.h"
 #include "gui/Sidebar.h"
+#include "SignatureUI.h"
 #include "gui/WasmBridge.h"
 #include "gui/DocCanvas.h"
 #include "gui/DialogWidgets.h"
 #include "gui/TabsUI.h"
 #include "Selection.h"
 #include "SelectionToolbar.h"
+#include "TranslatePopup.h"
 #include "LinkFollow.h"
 #include "ProgressUpdateUI.h"
 #include "TextSearch.h"
@@ -97,6 +99,7 @@
 #include "FindBar.h"
 #include "Toolbar.h"
 #include "ReadingBar.h"
+#include "MeasurementToolbar.h"
 #include "ReadingAutoScroll.h"
 #include "ReadAloud.h"
 #include "SelectTextKeyboard.h"
@@ -1517,7 +1520,9 @@ static void ShowLoadErrorTab(MainWindow* win, Str fullPath, LoadReuse reuse) {
     }
     if (tab) {
         HideFindBar(win);
+        DismissTranslatePopup(win);
         HideSelectionToolbar(win);
+        CloseMeasurement(win);
         bool hadReading = GetReadAloudSourceTab() == tab || CanContinueReadAloud(tab);
         ResetReadAloudStateForTab(tab);
         if (hadReading) {
@@ -1625,7 +1630,9 @@ static MainWindow* LoadDocumentFinish(MainWindow* win, Str fullPath, DocControll
     bool replaceDoc = reuse == LoadReuse::CurrentTab && reuseTab && !reuseTab->IsNonDocumentTab();
     if (replaceDoc || HomeTabToReuse(win)) {
         HideFindBar(win);
+        DismissTranslatePopup(win);
         HideSelectionToolbar(win);
+        CloseMeasurement(win);
         // orig's CloseDocumentInCurrentTab: the document the session reads is
         // about to be replaced
         bool hadReading = GetReadAloudSourceTab() == reuseTab || CanContinueReadAloud(reuseTab);
@@ -1726,9 +1733,11 @@ static MainWindow* LoadDocumentFinish(MainWindow* win, Str fullPath, DocControll
     }
 
     if (dm) {
-        // ng: gpui lays out in 96-dpi dips and scales the frame itself, so the
-        // document model works in dips too
+#if OS_WIN
+        dm->SetUiDpi(AppShellFrameDpi(win));
+#else
         dm->SetUiDpi(96);
+#endif
         if (fs) {
             dm->SetUniformPageWidth(fs->uniformPageWidth);
             dm->SetTrimEmptyMargins(fs->trimEmptyMargins);
@@ -1755,14 +1764,9 @@ static MainWindow* LoadDocumentFinish(MainWindow* win, Str fullPath, DocControll
                 engine->ChapterPageCount(chapter);
             }
         }
-        // orig hands CustomScreenDPI (device pixels per inch) to the model in
-        // place of the dpi Windows reports. ng: the model works in dips, which
-        // gpui scales by the window's dpi, so the value is converted to them
-        int dpi = 96;
-        if (gSettings->customScreenDPI > 0) {
-            // <= 0 means "not set" (users have been seen setting it to -1)
-            int winDpi = std::max(AppShellWindowDpi(win), 1);
-            dpi = (gSettings->customScreenDPI * 96 + winDpi / 2) / winDpi;
+        int dpi = gSettings->customScreenDPI;
+        if (dpi <= 0) {
+            dpi = AppShellWindowDpi(win);
         }
         dm->SetInitialViewSettings(displayMode, ss.page, win->GetViewPortSize(), dpi);
         // SetInitialViewSettings() has just taken the direction from the
@@ -1881,6 +1885,7 @@ static MainWindow* LoadDocumentFinish(MainWindow* win, Str fullPath, DocControll
         tab->sidebarContent = SidebarContent::Thumbnails;
         showToc = true;
     }
+    CheckTabSignatures(tab);
     SetTocVisibility(win, showToc);
     MaybeShowTemporaryFileNotification(win, tab);
 
@@ -3101,7 +3106,9 @@ static void CloseDocumentInCurrentTab(MainWindow* win) {
         return;
     }
     HideFindBar(win);
+    DismissTranslatePopup(win);
     HideSelectionToolbar(win);
+    CloseMeasurement(win);
     CloseAnnotationUiForTab(tab);
     ResetReadAloudStateForTab(tab);
     ReadingAutoScrollHideBar(win);
@@ -3628,6 +3635,7 @@ void CloseTab(WindowTab* tab, bool quitIfLast) {
     }
     logf("CloseTab: '%s', quitIfLast: %d\n", tab->filePath, (int)quitIfLast);
     if (IsCurrentTab(win, tab)) {
+        CloseMeasurement(win);
         // Cancel while win->ctrl still belongs to the closing tab. The toolbar
         // update in cancellation needs CurrentTab and ctrl to agree.
         CancelAnnotationPlacement(win);
@@ -3842,6 +3850,7 @@ void CloseWindow(MainWindow* win, bool quitIfLast, bool) {
     }
     win->isClosePending = false;
     win->isBeingClosed = true;
+    CloseMeasurement(win);
     logf("CloseWindow: 0x%p, %d windows open\n", win, len(gWindows));
     RememberClosedWindow(win);
     SyncTabGroup(win);
@@ -3962,9 +3971,8 @@ void OnMenuExit() {
 
 // --- the sidebar ------------------------------------------------------------
 
-// ng has no sidebar window to measure
-int SidebarNativeDx(MainWindow*) {
-    return 0;
+int SidebarNativeDx(MainWindow* win) {
+    return AppShellSidebarWidthPx(win);
 }
 
 #if OS_WIN
@@ -3998,7 +4006,6 @@ static void SyncCanvasAfterSidebar(MainWindow* win) {
 
 // Grow the frame by sidebar minus unused canvas margin (Fit Width has
 // none). Skip if already grown (tab switch). Hide undoes the grow.
-// The sidebar and the canvas margin are in dips, the frame in pixels.
 static void AdjustFrameForSidebarNow(MainWindow* win, bool show) {
     // a floating sidebar takes no space
     if (show && gSettings->sidebarAutoHide) {
@@ -4016,7 +4023,6 @@ static void AdjustFrameForSidebarNow(MainWindow* win, bool show) {
     Rect wr = HwndWindowRect(hwnd);
     Rect work = GetWorkAreaRect(wr, hwnd);
     bool onRight = gSettings->sidebarOnRight;
-    int dpi = AppShellWindowDpi(win);
 
     if (show) {
         if (win->sidebarGrewFrameDx > 0) {
@@ -4025,10 +4031,10 @@ static void AdjustFrameForSidebarNow(MainWindow* win, bool show) {
         int extra = SidebarExtraDx(win);
         int unused = 0;
         if (DisplayModel* dm = win->AsFixed()) {
-            unused = dm->UnusedCanvasDx();
+            unused = (int)std::round((float)dm->UnusedCanvasDx() / CanvasScale(win));
         }
         int spare = work.dx - wr.dx;
-        int grow = limitValue(MulDiv(extra - unused, dpi, 96), 0, std::max(spare, 0));
+        int grow = limitValue(extra - unused, 0, std::max(spare, 0));
         if (grow <= 0) {
             win->sidebarGrewFrameDx = 0;
             return;
@@ -4080,7 +4086,6 @@ static void AdjustFrameForSidebarNow(MainWindow* win, bool show) {
     }
     Rect work = AppShellWorkArea(win);
     bool onRight = gSettings->sidebarOnRight;
-    int dpi = AppShellWindowDpi(win);
 
     if (show) {
         if (win->sidebarGrewFrameDx > 0) {
@@ -4089,10 +4094,10 @@ static void AdjustFrameForSidebarNow(MainWindow* win, bool show) {
         int extra = SidebarExtraDx(win);
         int unused = 0;
         if (DisplayModel* dm = win->AsFixed()) {
-            unused = dm->UnusedCanvasDx();
+            unused = (int)std::round((float)dm->UnusedCanvasDx() / CanvasScale(win));
         }
         int spare = work.IsEmpty() ? 0 : work.dx - wr.dx;
-        int grow = limitValue(MulDiv(extra - unused, dpi, 96), 0, std::max(spare, 0));
+        int grow = limitValue(extra - unused, 0, std::max(spare, 0));
         if (grow <= 0) {
             win->sidebarGrewFrameDx = 0;
             return;
@@ -4109,7 +4114,7 @@ static void AdjustFrameForSidebarNow(MainWindow* win, bool show) {
         AppShellPlaceWindow(win, wr, false);
         // the native frame is already the new size; frameRc updates on the
         // next draw, and the layout read in between would still see the old one
-        win->frameRc.dx += grow;
+        win->frameRc.dx += (int)std::round((float)grow * CanvasScale(win));
         return;
     }
 
@@ -4124,7 +4129,7 @@ static void AdjustFrameForSidebarNow(MainWindow* win, bool show) {
     wr.dx -= shrunk;
     wr = AppShellShiftToWorkArea(wr, win, true);
     AppShellPlaceWindow(win, wr, false);
-    win->frameRc.dx -= shrunk;
+    win->frameRc.dx -= (int)std::round((float)shrunk * CanvasScale(win));
 #endif
 }
 
@@ -4164,6 +4169,9 @@ static bool PanelContentAvailable(MainWindow* win, SidebarContent content) {
     }
     if (content == SidebarContent::Layers) {
         return SidebarHasLayers(win);
+    }
+    if (content == SidebarContent::Signatures) {
+        return TabHasSignatures(win->CurrentTab());
     }
     if (content == SidebarContent::Thumbnails) {
         return win->AsFixed() != nullptr;
@@ -4230,7 +4238,8 @@ void SetSidebarVisibility(MainWindow* win, bool tocVisible, bool showFavorites, 
     if (!tab) {
         ReportIf(tocVisible);
     } else if (!win->InPresentation()) {
-        bool pending = topContent == SidebarContent::Bookmarks && headingPending;
+        bool pending = (topContent == SidebarContent::Bookmarks && headingPending) ||
+                       (topContent == SidebarContent::Signatures && tab->signaturesPending);
         if (topAvailable || pending) {
             tab->showToc = requestedToc;
         } else {
@@ -5700,6 +5709,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
             ReadingBarToggleInvert(win);
             break;
 
+        case CmdMeasure:
+            ToggleMeasurement(win);
+            break;
+
         case CmdToggleCaption:
             ToggleCaption(cmd);
             break;
@@ -6068,6 +6081,10 @@ void ExecuteCmd(MainWindow* win, int cmdId) {
 
         case CmdToggleThumbnails:
             SidebarToggleThumbnails(win);
+            break;
+
+        case CmdShowSignatures:
+            SidebarShowSignatures(win);
             break;
 
         case CmdToggleLayers:
@@ -7649,6 +7666,13 @@ int GpuiMain(int argc, char** argv) {
         RebuildMenuBar(win);
         StartStressTest(gFlags, win);
     }
+#if OS_WIN
+    // Windows can distinguish fixed drives from removable or remote drives for missing files.
+    if (!restoredSession && len(gFlags->fileNames) == 0 && SettingsRememberOpenedFiles() && gSettings->showStartPage &&
+        FileHistoryGet(0)) {
+        RemoveNonExistentFilesAsync();
+    }
+#endif
     // call this once it's clear whether Perm::SavePreferences has been granted
     RegisterSettingsForFileChanges();
     RegenerateMissingThumbnails();

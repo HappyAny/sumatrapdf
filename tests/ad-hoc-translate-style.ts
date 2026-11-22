@@ -10,7 +10,6 @@ import {
   clientToScreen,
   enumChildWindows,
   findTopWindow,
-  getClassName,
   getClientRect,
   getControlText,
   getWindowRect,
@@ -22,7 +21,7 @@ import {
   setProcessDpiAware,
   setWindowPos,
 } from "./winapi.ts";
-import { controlById, ReadingControl, TranslateControl } from "./translate-test-controls.ts";
+import { controlById, ReadingControl, TranslateControl, translationBody } from "./translate-test-controls.ts";
 
 const TIMEOUT = 8000;
 const BM_CLICK = 0x00f5;
@@ -124,13 +123,7 @@ function popup(session: Session): number {
 }
 
 function body(session: Session): number {
-  let found = 0;
-  enumChildWindows(popup(session), (child) => {
-    if (getClassName(child).toLowerCase() === "edit") found = child;
-    return true;
-  });
-  assert(found, "translation text control is missing");
-  return found;
+  return translationBody(popup(session));
 }
 
 function dimensions(hwnd: number): { width: number; height: number } {

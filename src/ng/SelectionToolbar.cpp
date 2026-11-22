@@ -34,6 +34,7 @@
 #include "gui/DocCanvas.h"
 #include "Selection.h"
 #include "SelectionToolbar.h"
+#include "TranslatePopup.h"
 #include "SvgIcons.h"
 #include "Toolbar.h"
 #include "SelectionToolbarCommon.h"
@@ -53,6 +54,7 @@ struct SelectionToolbar {
     // where the card ended up last frame; gpui reports it one frame late, which
     // is enough to center the card on the selection from the second frame on
     gp::Bounds measured;
+    Rect cardInCanvas;
 };
 
 static SelectionToolbar* GetOrCreateToolbar(MainWindow* win) {
@@ -115,6 +117,9 @@ static void ShowSelectionToolbarNow(MainWindow* win) {
 // A completed mouse gesture shows immediately. Repaint-driven requests wait
 // for the selection to settle so the toolbar does not flash while it changes.
 void ShowSelectionToolbar(MainWindow* win, SelToolbarShow when) {
+    if (win && when == SelToolbarShow::Now) {
+        ShowTranslatePopup(win);
+    }
     if (!win || !gSettings->selectionToolbar) {
         return;
     }
@@ -161,6 +166,7 @@ void UpdateSelectionToolbarPosition(MainWindow* win) {
     if (!win) {
         return;
     }
+    UpdateTranslatePopup(win);
     // Hide during drag so the bar does not chase the rubber-band selection.
     if (IsActivelySelecting(win)) {
         if (IsSelectionToolbarVisible(win)) {
@@ -190,6 +196,7 @@ void UpdateSelectionToolbarPosition(MainWindow* win) {
 
 // Hide the toolbar; a new selection gets it back.
 void HideSelectionToolbar(MainWindow* win) {
+    HideTranslatePopup(win);
     CancelPendingShow(win);
     SelectionToolbar* tb = win ? win->selectionToolbar : nullptr;
     if (!tb || !tb->visible) {
@@ -201,6 +208,7 @@ void HideSelectionToolbar(MainWindow* win) {
 }
 
 void DeleteSelectionToolbar(MainWindow* win) {
+    DeleteTranslatePopup(win);
     SelectionToolbar* tb = win ? win->selectionToolbar : nullptr;
     if (!tb) {
         return;
@@ -327,6 +335,7 @@ gp::El* SelectionToolbarBuild(MainWindow* win, gp::Ctx* cx) {
     x = std::max(x, 0.f);
     y = std::min(y, canvasH - h);
     y = std::max(y, 0.f);
+    tb->cardInCanvas = Rect((int)(x + 0.5f), (int)(y + 0.5f), (int)(w + 0.5f), (int)(h + 0.5f));
     card->Absolute()->Left(x)->Top(y);
     if (tb->measured.w <= 0) {
         // placed from a guessed size: show it from the next frame, placed from
@@ -335,6 +344,23 @@ gp::El* SelectionToolbarBuild(MainWindow* win, gp::Ctx* cx) {
         AppShellInvalidate(win);
     }
     return card;
+}
+
+Rect TranslateToolbarScreenRect(MainWindow* win) {
+    if (!IsSelectionToolbarVisible(win)) {
+        return {};
+    }
+    Rect canvas = AppShellCanvasScreenRect(win);
+    Rect box = win->selectionToolbar->cardInCanvas;
+    if (canvas.IsEmpty() || win->canvasRc.IsEmpty()) {
+        return {};
+    }
+    int width = win->canvasRc.dx;
+    box.x = canvas.x + MulDiv(box.x, canvas.dx, width);
+    box.y = canvas.y + MulDiv(box.y, canvas.dx, width);
+    box.dx = MulDiv(box.dx, canvas.dx, width);
+    box.dy = MulDiv(box.dy, canvas.dx, width);
+    return box.Intersect(canvas);
 }
 
 // Parsed and laid-out selection toolbar state for -dbg-control tests.

@@ -1082,6 +1082,8 @@ struct Settings {
     Str translatePopupFont;
     // translation text size in points, from 8 to 32
     int translatePopupFontSize;
+    // translation line spacing as a whole percent, from 1 to 200
+    int translatePopupLineSpacing;
     // use bold font weight for translation text
     bool translatePopupBold;
     // fit translation popup height to its text

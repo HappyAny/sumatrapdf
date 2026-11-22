@@ -50,6 +50,7 @@
 #include "gui/GpuiTheme.h"
 #include "OverlayScrollbar.h"
 #include "ReadingBar.h"
+#include "MeasurementToolbar.h"
 #include "ReadingAutoScroll.h"
 #include "ReadAloud.h"
 #include "Annotation.h"
@@ -58,6 +59,7 @@
 #include "AnnotPlacement.h"
 #include "gui/OleDragDrop.h"
 #include "AnnotTextPopup.h"
+#include "TranslatePopup.h"
 #include "RefHover.h"
 #include "FormFields.h"
 #include "Menu.h"
@@ -2115,6 +2117,10 @@ static void OnSetCursorMouseNone(MainWindow* win, Point pt) {
 
 // orig's OnSetCursor: the cursor that belongs to the action in progress
 static void OnSetCursor(MainWindow* win, Point pt) {
+    if (win->measurementToolbar && win->mouseAction == MouseAction::None) {
+        CanvasSetCursor(win, kCurCross);
+        return;
+    }
     if (win->mouseAction != MouseAction::None) {
         DeleteLinkTooltip(win);
     }
@@ -2658,6 +2664,9 @@ static bool IsTripleClick() {
 }
 
 static void OnMouseLeftButtonDown(MainWindow* win, int x, int y) {
+    if (MeasurementOnClick(win, Point{x, y}, CanvasCtrlPressed())) {
+        return;
+    }
     // orig closes a pinned hover menu when the page is pressed
     HideToolbarHoverDropdown(win);
     win->pressOnlyDeselected = false;
@@ -2923,6 +2932,9 @@ static void OnMouseLeftButtonDown(MainWindow* win, int x, int y) {
 // orig's OnMouseLeftButtonDblClk. False when the press was not a double-click
 // action, so the caller can still treat it as an ordinary click.
 static bool OnMouseLeftButtonDblClk(MainWindow* win, int x, int y) {
+    if (MeasurementOnClick(win, Point{x, y}, CanvasCtrlPressed())) {
+        return true;
+    }
     DisplayModel* dm = win->AsFixed();
     if (!dm) {
         return false;
@@ -3096,6 +3108,9 @@ static bool RunJsMenuItem(MainWindow* win, int cmdId) {
 // forward-search branches. cx is null for a click from -dbg-control, which then
 // can't show a JavaScript menu
 static void OnMouseLeftButtonUp(MainWindow* win, gp::Ctx* cx, int x, int y) {
+    if (win->measurementToolbar) {
+        return;
+    }
     if (ReadingBarOnLeftUp(win)) {
         return;
     }
@@ -3413,6 +3428,9 @@ void CanvasCancelDrag(MainWindow* win) {
 constexpr int kHideCursorDelayInMs = 3000;
 
 static void OnMouseMove(MainWindow* win, int x, int y) {
+    if (MeasurementOnMove(win, Point{x, y})) {
+        return;
+    }
     if (ReadingBarOnMouseMove(win, x, y)) {
         return;
     }
@@ -3693,6 +3711,7 @@ void DocCanvasView::OnPaint(gp::PaintCtx* ctx, gp::El* e, void* user) {
     ReadingBarPaint(win, ctx);
     PaintReadAloudHighlight(win, ctx);
     PaintAllFindMatches(win, ctx);
+    PaintMeasurement(win, ctx, b.x, b.y, gFrame.k);
     if (win->fwdSearchMark.show) {
         PaintForwardSearchMark(win, ctx);
     }
@@ -4221,9 +4240,15 @@ gp::El* DocCanvasBuild(MainWindow* win, gp::Ctx* cx) {
     if (tip) {
         root->Child(tip);
     }
+    if (gp::El* translateArrow = TranslateArrowBuild(win, cx)) {
+        root->Child(translateArrow);
+    }
     gp::El* selBar = SelectionToolbarBuild(win, cx);
     if (selBar) {
         root->Child(selBar);
+    }
+    if (gp::El* measure = BuildMeasurementFallback(win, cx)) {
+        root->Child(measure);
     }
     gp::El* autoBar = ReadingAutoScrollBarBuild(win, cx);
     if (autoBar) {

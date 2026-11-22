@@ -19,6 +19,7 @@ struct NotificationWnd;
 struct ILinkHandler;
 struct IPageElement;
 struct SelectionToolbar;
+struct MeasurementToolbar;
 struct Toolbar;
 struct FindBar;
 struct FindWindowWnd;
@@ -309,6 +310,7 @@ struct MainWindow {
     int readingBarDragOff = 0;
     bool readingBarHover = false;
     ReadingAutoScrollBar* readingAutoScrollBar = nullptr;
+    MeasurementToolbar* measurementToolbar = nullptr;
     // the tab the bar scrolls, null while it is hidden
     WindowTab* readingAutoScrollTab = nullptr;
 
@@ -455,7 +457,7 @@ struct MainWindow {
     int aiChatProvider = -1;
     // width of the AI chat panel in dips; orig's win->aiChatDx
     int aiChatDx = 0;
-    // width of the sidebar in dips; orig's win->sidebarDx
+    // width of the sidebar in screen pixels, as stored in Settings
     int sidebarDx = 0;
     // SidebarAutoHide: the floating sidebar is shown (by the mouse or the
     // keyboard) and whether the mouse is over it

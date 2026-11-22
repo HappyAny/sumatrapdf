@@ -8,6 +8,7 @@
 #include "LlmTranslate.h"
 #include "LlmRequestOptions.h"
 #include "TranslateParams.h"
+#include "TranslatePopup.h"
 
 constexpr WCHAR kParamsClass[] = L"SumatraTranslateParams";
 constexpr UINT_PTR kParamsSubclass = 1;
@@ -177,20 +178,23 @@ static void LayoutParams(ParamsDialog* p) {
                DpiScaleByDpi(p->dpi, 64), TRUE);
     MoveWindow(p->nameLabel, margin, DpiScaleByDpi(p->dpi, 84), nameWidth, DpiScaleByDpi(p->dpi, 24), TRUE);
     MoveWindow(p->valueLabel, valueX, DpiScaleByDpi(p->dpi, 84), valueWidth, DpiScaleByDpi(p->dpi, 24), TRUE);
+    DeferWinPosHelper positions;
     for (int i = 0; i < len(p->rows); i++) {
         const ParamRow& row = p->rows[i];
         int y = DpiScaleByDpi(p->dpi, 8 + i * kParamsRowHeight) - p->scroll;
-        MoveWindow(row.name, margin, y, nameWidth, buttonHeight, TRUE);
-        MoveWindow(row.value, valueX, y, valueWidth, buttonHeight, TRUE);
-        MoveWindow(row.remove, valueX + valueWidth + gap, y, removeWidth, buttonHeight, TRUE);
+        positions.MoveWindowNoCopyBits(row.name, Rect(margin, y, nameWidth, buttonHeight));
+        positions.MoveWindowNoCopyBits(row.value, Rect(valueX, y, valueWidth, buttonHeight));
+        positions.MoveWindowNoCopyBits(row.remove, Rect(valueX + valueWidth + gap, y, removeWidth, buttonHeight));
         int id = kParamsRowBase + i * kParamsRowIds;
         SetWindowLongPtrW(row.name, GWLP_ID, id);
         SetWindowLongPtrW(row.value, GWLP_ID, id + 1);
         SetWindowLongPtrW(row.remove, GWLP_ID, id + 2);
     }
-    MoveWindow(p->add, margin, DpiScaleByDpi(p->dpi, 8 + len(p->rows) * kParamsRowHeight) - p->scroll,
-               DpiScaleByDpi(p->dpi, 150), buttonHeight, TRUE);
+    int addY = DpiScaleByDpi(p->dpi, 8 + len(p->rows) * kParamsRowHeight) - p->scroll;
+    positions.MoveWindowNoCopyBits(p->add, Rect(margin, addY, DpiScaleByDpi(p->dpi, 150), buttonHeight));
+    positions.End();
     EnableWindow(p->add, len(p->rows) < kParamsMaxRows);
+    RepaintTranslateScrollPane(p->content);
     MoveWindow(p->note, margin, noteY, std::max(1, (int)client.right - 2 * margin), noteHeight, TRUE);
     MoveWindow(p->save, client.right - margin - buttonWidth, footer, buttonWidth, buttonHeight, TRUE);
     MoveWindow(p->cancel, client.right - margin - 2 * buttonWidth - gap, footer, buttonWidth, buttonHeight, TRUE);
@@ -210,11 +214,11 @@ static void RevealParam(ParamsDialog* p, HWND child) {
     LayoutParams(p);
 }
 
-static void ScrollParams(ParamsDialog* p, UINT command) {
+static void ScrollParams(ParamsDialog* p, WPARAM request) {
     SCROLLINFO info{sizeof(info), SIF_ALL};
     GetScrollInfo(p->content, SB_VERT, &info);
     int step = DpiScaleByDpi(p->dpi, 24);
-    switch (command) {
+    switch (LOWORD(request)) {
         case SB_LINEUP:
             p->scroll -= step;
             break;
@@ -235,7 +239,7 @@ static void ScrollParams(ParamsDialog* p, UINT command) {
             break;
         case SB_THUMBPOSITION:
         case SB_THUMBTRACK:
-            p->scroll = info.nTrackPos;
+            p->scroll = info.nMax <= UINT16_MAX ? HIWORD(request) : info.nTrackPos;
             break;
         default:
             return;
@@ -302,8 +306,7 @@ static void UpdateParamsTheme(ParamsDialog* p) {
 }
 
 static void CreateParamsControls(ParamsDialog* p) {
-    p->content = ParamControl(p, p->hwnd, L"STATIC", L"", WS_CLIPCHILDREN | WS_VSCROLL);
-    SetWindowLongPtrW(p->content, GWL_EXSTYLE, GetWindowLongPtrW(p->content, GWL_EXSTYLE) | WS_EX_CONTROLPARENT);
+    p->content = NewTranslateScrollPane(p->hwnd);
     SetWindowSubclass(p->content, ParamContentProc, kParamsSubclass, (DWORD_PTR)p->hwnd);
     p->description =
         ParamControl(p, p->hwnd, L"STATIC",
@@ -350,7 +353,7 @@ static LRESULT CALLBACK ParamsWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             LayoutParams(p);
             return 0;
         case WM_VSCROLL:
-            ScrollParams(p, LOWORD(wp));
+            ScrollParams(p, wp);
             return 0;
         case WM_MOUSEWHEEL:
             p->scroll -= GET_WHEEL_DELTA_WPARAM(wp) * DpiScaleByDpi(p->dpi, 24) / WHEEL_DELTA;

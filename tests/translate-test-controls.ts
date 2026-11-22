@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { ptr } from "bun:ffi";
-import { enumChildWindows, getWindowLong, sendMessage } from "./winapi.ts";
+import { enumChildWindows, getClassName, getWindowLong, sendMessage } from "./winapi.ts";
 
 const GWL_ID = -12;
 const CB_GETCOUNT = 0x0146;
@@ -30,6 +30,7 @@ export const TranslateControl = {
   maxHeight: 3125,
   bold: 3126,
   position: 3127,
+  lineSpacing: 3128,
 } as const;
 
 export const ReadingControl = { smaller: 3010, larger: 3011, autoSize: 3012, bold: 3013 } as const;
@@ -53,6 +54,16 @@ export function controlById(parent: number, id: number): number {
   });
   if (!found) throw new Error(`translation control ${id} is missing`);
   return found;
+}
+
+export function translationBody(parent: number): number {
+  let body = 0;
+  enumChildWindows(parent, (hwnd) => {
+    if (/^(edit|richedit50w)$/i.test(getClassName(hwnd))) body = hwnd;
+    return !body;
+  });
+  if (!body) throw new Error("translation text control is missing");
+  return body;
 }
 
 export function comboItems(hwnd: number): string[] {

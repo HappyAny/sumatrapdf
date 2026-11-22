@@ -287,8 +287,8 @@ struct FileState {
     // hex encoded MD5 fingerprint of the file content (32 chars) followed
     // by the crypt key (64 chars); only applies to PDF documents
     Str decryptionKey;
-    // what the sidebar's top panel shows: bookmarks (the default) or
-    // thumbnails
+    // what the sidebar's top panel shows: bookmarks (the default),
+    // thumbnails, favorites, signatures or layers
     Str sidebarView;
     // how pages are laid out for this document. The string is the
     // persisted form of DisplayModel::displayMode, so it's parsed after
@@ -399,7 +399,8 @@ struct TabState {
     // if true, the table of contents was shown when the document was
     // closed
     bool showToc;
-    // what the sidebar's top panel showed: bookmarks or thumbnails
+    // what the sidebar's top panel showed: bookmarks, thumbnails,
+    // favorites, signatures or layers
     Str sidebarView;
     // which table of contents items were expanded (see FileStates ->
     // TocState)
@@ -1081,6 +1082,8 @@ struct Settings {
     Str translatePopupFont;
     // translation text size in points, from 8 to 32
     int translatePopupFontSize;
+    // translation line spacing as a whole percent, from 1 to 200
+    int translatePopupLineSpacing;
     // use bold font weight for translation text
     bool translatePopupBold;
     // fit translation popup height to its text

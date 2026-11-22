@@ -2,6 +2,8 @@
 
 struct HttpStreamCancel;
 
+constexpr int kLlmSourceLimit = 256 * 1024;
+
 struct LlmTranslateRequest {
     Str url;
     Str model;

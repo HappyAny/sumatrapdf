@@ -1254,8 +1254,13 @@ const fileState: Field[] = [
   ),
   compactStruct("WindowPos", windowPos, "default position (can be on any monitor)").structName("Rect"),
   field("ShowToc", Bool, true, "if true, show the table of contents (Bookmarks) sidebar when the document has one"),
-  field("SidebarView", Str, null, "what the sidebar's top panel shows: bookmarks (the default) or thumbnails")
-    .enum(["bookmarks", "thumbnails"])
+  field(
+    "SidebarView",
+    Str,
+    null,
+    "what the sidebar's top panel shows: bookmarks (the default), thumbnails, favorites, signatures or layers",
+  )
+    .enum(["bookmarks", "thumbnails", "favorites", "signatures", "layers"])
     .emptyMeans("bookmarks")
     .ver("3.7"),
   field("SidebarDx", Int, 0, "width of the bookmarks / favorites sidebar in screen pixels, as last resized"),
@@ -1406,8 +1411,13 @@ const tabState: Field[] = [
     "PointF",
   ),
   field("ShowToc", Bool, true, "if true, the table of contents was shown when the document was closed"),
-  field("SidebarView", Str, null, "what the sidebar's top panel showed: bookmarks or thumbnails")
-    .enum(["bookmarks", "thumbnails"])
+  field(
+    "SidebarView",
+    Str,
+    null,
+    "what the sidebar's top panel showed: bookmarks, thumbnails, favorites, signatures or layers",
+  )
+    .enum(["bookmarks", "thumbnails", "favorites", "signatures", "layers"])
     .emptyMeans("bookmarks")
     .ver("3.7"),
   compactArray("TocState", Int, null, "which table of contents items were expanded (see FileStates -> TocState)"),
@@ -1518,7 +1528,7 @@ const globalPrefs: Field[] = [
   field(
     "ThumbnailsType",
     Str,
-    "full",
+    "legacy",
     "how the home page thumbnail is made from a document's first page: legacy (the top of the page, " +
       "cropped to a 212x150 frame) or full (the whole page, scaled to fit a 150x212 frame). Changing it " +
       "re-creates the thumbnails of the files that still exist in a background process",
@@ -2003,7 +2013,7 @@ const globalPrefs: Field[] = [
   field(
     "TabsEqualWidth",
     Bool,
-    false,
+    true,
     "if true, all tabs are equally wide. If false, a tab is as wide as its file name needs, up to TabWidth",
   ).ver("3.7"),
   // Built-in names must stay in sync with themesTxt in src/Theme.cpp (plus System)
@@ -2297,6 +2307,7 @@ const globalPrefs: Field[] = [
     .ver("3.7"),
   field("TranslatePopupFont", Str, "Microsoft YaHei UI", "font family used only for translation text").ver("3.7"),
   field("TranslatePopupFontSize", Int, 11, "translation text size in points, from 8 to 32").ver("3.7"),
+  field("TranslatePopupLineSpacing", Int, 100, "translation line spacing as a whole percent, from 1 to 200").ver("3.7"),
   field("TranslatePopupBold", Bool, false, "use bold font weight for translation text").ver("3.7"),
   field("TranslatePopupAutoSize", Bool, true, "fit translation popup height to its text").ver("3.7"),
   field("TranslatePopupWidth", Int, 460, "translation reading or manual width in 96-DPI units, from 330 to 1600").ver(
@@ -2495,6 +2506,7 @@ const globalPrefsLayout = [
   "TranslatePopupCustomParams",
   "TranslatePopupFont",
   "TranslatePopupFontSize",
+  "TranslatePopupLineSpacing",
   "TranslatePopupBold",
   "TranslatePopupAutoSize",
   "TranslatePopupWidth",

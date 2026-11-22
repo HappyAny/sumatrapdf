@@ -51,6 +51,7 @@ const user32 = loadDll("user32.dll", {
   EnumWindows: { args: [FFIType.function, FFIType.i64], returns: FFIType.bool },
   EnumChildWindows: { args: [FFIType.ptr, FFIType.function, FFIType.i64], returns: FFIType.bool },
   GetClassNameW: { args: [FFIType.ptr, FFIType.ptr, FFIType.i32], returns: FFIType.i32 },
+  GetClassLongW: { args: [FFIType.ptr, FFIType.i32], returns: FFIType.u32 },
   GetWindowThreadProcessId: { args: [FFIType.ptr, FFIType.ptr], returns: FFIType.u32 },
   GetWindow: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.u64 },
   PostMessageW: { args: [FFIType.ptr, FFIType.u32, FFIType.i64, FFIType.i64], returns: FFIType.bool },
@@ -556,6 +557,11 @@ export function getClassName(hwnd: number): string {
     s += String.fromCharCode(buf[i]);
   }
   return s;
+}
+
+export function getWindowClassStyle(hwnd: number): number {
+  const GCL_STYLE = -26;
+  return user32.symbols.GetClassLongW(hwnd, GCL_STYLE);
 }
 
 export function getWindowPid(hwnd: number): number {

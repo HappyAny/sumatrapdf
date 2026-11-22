@@ -9,14 +9,22 @@ import {
   captureWindowToPng,
   clientToScreen,
   enumChildWindows,
+  enumWindows,
   findTopWindow,
   getClassName,
   getClientRect,
   getControlText,
   getFocusedHwnd,
+  getWindowClassStyle,
+  getWindowLong,
+  getWindowOwner,
   getWindowRect,
   getWorkArea,
+  GWL_EXSTYLE,
+  GWL_STYLE,
   isWindowVisible,
+  MK_LBUTTON,
+  packCoords,
   postKeyWithModifier,
   repaintWindow,
   sendMessage,
@@ -24,22 +32,39 @@ import {
   setProcessDpiAware,
   setWindowPos,
   VK_CONTROL,
+  WM_LBUTTONDOWN,
+  WM_LBUTTONUP,
+  WM_MOUSEMOVE,
+  WS_THICKFRAME,
 } from "./winapi.ts";
-import { controlById, ReadingControl, selectCombo, TranslateControl } from "./translate-test-controls.ts";
+import {
+  controlById,
+  ReadingControl,
+  selectCombo,
+  TranslateControl,
+  translationBody,
+} from "./translate-test-controls.ts";
 
 const TIMEOUT = 8000;
 const BM_CLICK = 0x00f5;
 const BM_GETCHECK = 0x00f0;
 const WM_KEYDOWN = 0x0100;
+const WM_NCHITTEST = 0x0084;
 const VK_TAB = 0x09;
 const VK_RETURN = 0x0d;
 const VK_ESCAPE = 0x1b;
 const WM_ENTERSIZEMOVE = 0x0231;
 const WM_EXITSIZEMOVE = 0x0232;
 const WM_MOUSEWHEEL = 0x020a;
+const HTRIGHT = 11n;
+const HTBOTTOM = 15n;
+const CS_DROPSHADOW = 0x00020000;
 const EM_GETLINECOUNT = 0x00ba;
 const EM_GETFIRSTVISIBLELINE = 0x00ce;
 const EM_LINESCROLL = 0x00b6;
+const WS_VSCROLL = 0x00200000;
+const WS_EX_TRANSPARENT = 0x20;
+const OVERLAY_SCROLLBAR_CLASS = "SUMATRA_OVERLAY_SCROLLBAR";
 const SHORT = "简短译文。";
 const LONG = ("这是一段用于验证浮窗换行与高度上限的译文，包含中文、公式 α≤β 和参考文献 [12]。".repeat(7) + "\n").repeat(
   15,
@@ -57,6 +82,8 @@ type State = {
   request: number;
   fontSize: number;
   fontPixels: number;
+  lineSpacing: number;
+  linePitch: number;
   autoSize: boolean;
   preferredWidth: number;
   preferredHeight: number;
@@ -91,6 +118,8 @@ async function state(client: ControlClient, action = ""): Promise<State> {
     request: Number(fields.request || 0),
     fontSize: Number(fields.fontSize),
     fontPixels: Number(fields.fontPixels),
+    lineSpacing: Number(fields.lineSpacing),
+    linePitch: Number(fields.linePitch),
     autoSize: fields.autoSize === "1",
     preferredWidth: Number(fields.preferredWidth),
     preferredHeight: Number(fields.preferredHeight),
@@ -125,13 +154,20 @@ function popup(session: Session): number {
 }
 
 function body(session: Session): number {
-  let edit = 0;
-  enumChildWindows(popup(session), (child) => {
-    if (getClassName(child).toLowerCase() === "edit") edit = child;
-    return true;
+  return translationBody(popup(session));
+}
+
+function popupScrollbar(owner: number): number {
+  let scrollbar = 0;
+  enumWindows((hwnd) => {
+    if (getWindowOwner(hwnd) === owner && getClassName(hwnd) === OVERLAY_SCROLLBAR_CLASS) scrollbar = hwnd;
+    return !scrollbar;
   });
-  assert(edit, "translation body EDIT is missing");
-  return edit;
+  return scrollbar;
+}
+
+function scrollbarVisible(hwnd: number): boolean {
+  return !!hwnd && isWindowVisible(hwnd) && !(getWindowLong(hwnd, GWL_EXSTYLE) & WS_EX_TRANSPARENT);
 }
 
 function dimensions(hwnd: number): { width: number; height: number } {
@@ -399,6 +435,16 @@ export async function testit(): Promise<void> {
       "defaults",
       async ({ session, received }) => {
         const hwnd = popup(session);
+        assert(!(getWindowClassStyle(hwnd) & CS_DROPSHADOW), "popup adds a legacy drop shadow to its native frame");
+        assert(getWindowLong(hwnd, GWL_STYLE) & WS_THICKFRAME, "popup lost its resizable frame");
+        const frame = getWindowRect(hwnd);
+        assert(
+          sendMessage(hwnd, WM_NCHITTEST, 0, packCoords(frame.right - 1, (frame.top + frame.bottom) >> 1)) ===
+            HTRIGHT &&
+            sendMessage(hwnd, WM_NCHITTEST, 0, packCoords((frame.left + frame.right) >> 1, frame.bottom - 1)) ===
+              HTBOTTOM,
+          "right and bottom resize edges no longer respond",
+        );
         for (const id of Object.values(ReadingControl)) controlById(hwnd, id);
         const current = await state(session.client);
         assert(current.fontSize === 11 && current.fontPixels > 0 && current.autoSize, "reading defaults are wrong");
@@ -485,6 +531,49 @@ export async function testit(): Promise<void> {
         );
         const edit = body(session);
         assert(Number(sendMessage(edit, EM_GETLINECOUNT, 0, 0)) > 30, "long translation was not laid out");
+        assert(
+          !(getWindowLong(edit, GWL_STYLE) & WS_VSCROLL),
+          "translation still reserves the native scrollbar gutter",
+        );
+        const scrollbar = popupScrollbar(hwnd);
+        assert(scrollbar && !scrollbarVisible(scrollbar), "floating scrollbar did not start hidden");
+        sendMessage(edit, WM_MOUSEMOVE, 0, packCoords(12, 12));
+        await pollUntil(() => scrollbarVisible(scrollbar), Boolean, {
+          timeoutMs: TIMEOUT,
+          error: "hover did not reveal the thumb",
+        });
+        const track = getWindowRect(scrollbar);
+        const readingArea = getWindowRect(edit);
+        assert(
+          track.right === readingArea.right &&
+            track.top === readingArea.top &&
+            track.bottom === readingArea.bottom &&
+            track.right - track.left <= Math.round((6 * longState.dpi) / 96),
+          "floating thumb is too wide or extends beyond the translation area",
+        );
+        // High-resolution wheels can report fractions of one detent.
+        for (let i = 0; i < 4; i++) sendMessage(edit, WM_MOUSEWHEEL, -30 << 16, 0);
+        const wheeled = Number(sendMessage(edit, EM_GETFIRSTVISIBLELINE, 0, 0));
+        assert(wheeled > 0, "mouse wheel did not scroll the translation");
+        sendMessage(edit, WM_MOUSEWHEEL, 120 << 16, 0);
+        assert(
+          Number(sendMessage(edit, EM_GETFIRSTVISIBLELINE, 0, 0)) === 0,
+          "mouse wheel did not scroll back to the start",
+        );
+        const thumbStart = packCoords(Math.floor((track.right - track.left) / 2), 2);
+        const thumbEnd = packCoords(Math.floor((track.right - track.left) / 2), track.bottom - track.top - 2);
+        sendMessage(scrollbar, WM_LBUTTONDOWN, MK_LBUTTON, thumbStart);
+        sendMessage(scrollbar, WM_MOUSEMOVE, MK_LBUTTON, thumbEnd);
+        sendMessage(scrollbar, WM_LBUTTONUP, 0, thumbEnd);
+        assert(
+          Number(sendMessage(edit, EM_GETFIRSTVISIBLELINE, 0, 0)) > wheeled,
+          "dragging the floating thumb did not scroll the translation",
+        );
+        await pollUntil(
+          () => scrollbarVisible(scrollbar),
+          (visible) => !visible,
+          { timeoutMs: TIMEOUT, error: "floating thumb did not auto-hide" },
+        );
         sendMessage(edit, EM_LINESCROLL, 0, 100000);
         assert(Number(sendMessage(edit, EM_GETFIRSTVISIBLELINE, 0, 0)) > 0, "long translation cannot scroll");
         sendMessage(edit, WM_MOUSEWHEEL, -120 << 16, 0);
@@ -494,9 +583,121 @@ export async function testit(): Promise<void> {
         await state(session.client, "retry");
         await expectText(session);
         assert(sameSize(dimensions(hwnd), short), "short translation did not shrink back to fitted height");
+        sendMessage(body(session), WM_MOUSEMOVE, 0, packCoords(12, 12));
+        assert(!scrollbarVisible(scrollbar), "a short translation showed a floating scrollbar");
         assert(received.length === 3, "automatic sizing triggered extra requests");
       },
       { reply: (_request, ordinal) => chat(ordinal === 2 ? LONG : SHORT) },
+    );
+
+    const spacedText = [
+      "{\\rtf1\\ansi 原样显示这段文字}",
+      "第二行：中文排版。",
+      ...Array(5).fill("这是一行用于测量间距的译文。"),
+    ].join("\n");
+    await run(
+      "line-spacing",
+      async ({ session, received }) => {
+        const before = await expectText(session, spacedText);
+        const hwnd = popup(session);
+        const edit = body(session);
+        const initialSize = dimensions(hwnd);
+        const form = await openConfig(session);
+        const spacing = form.field("lineSpacing");
+        assert(getClassName(spacing).toLowerCase() === "edit", "line spacing is not an editable field");
+        assert(
+          getControlText(spacing) === "100%" && before.lineSpacing === 100,
+          "old settings did not default to single spacing",
+        );
+        assert(
+          getControlText(edit).replaceAll("\r\n", "\n") === spacedText,
+          "display changed the plain translation text",
+        );
+        await capture(session, "line-spacing-100");
+        sendText(spacing, "83");
+        await closeConfig(form, true);
+        const compact = await waitState(session, (value) => value.lineSpacing === 83, "83% was not applied");
+        const compactSize = dimensions(hwnd);
+        assert(
+          compact.linePitch > 0 &&
+            compact.linePitch < before.linePitch &&
+            Math.abs(compact.linePitch - before.linePitch * 0.83) <= 2,
+          `rendered line pitch did not shrink to 83% (${before.linePitch} → ${compact.linePitch})`,
+        );
+        assert(
+          compactSize.width === initialSize.width && compactSize.height < initialSize.height,
+          "automatic height did not shrink with tighter text",
+        );
+        await capture(session, "line-spacing-83");
+
+        const larger = controlById(hwnd, ReadingControl.larger);
+        const smaller = controlById(hwnd, ReadingControl.smaller);
+        for (let i = 0; i < 3; i++) sendMessage(larger, BM_CLICK, 0, 0);
+        const largerFont = await state(session.client);
+        assert(
+          largerFont.lineSpacing === 83 && largerFont.linePitch > compact.linePitch,
+          "tighter spacing did not scale with the changed font",
+        );
+        for (let i = 0; i < 3; i++) sendMessage(smaller, BM_CLICK, 0, 0);
+
+        const wider = await openConfig(session);
+        sendText(wider.field("lineSpacing"), "137%");
+        await closeConfig(wider, true);
+        const expanded = await waitState(session, (value) => value.lineSpacing === 137, "137% was not applied");
+        const expandedSize = dimensions(hwnd);
+        assert(
+          before.linePitch > 0 && expanded.linePitch >= before.linePitch * 1.3,
+          "actual rendered lines did not spread",
+        );
+        assert(
+          expandedSize.width === initialSize.width && expandedSize.height > initialSize.height,
+          "automatic height did not respond to line spacing",
+        );
+        assert(
+          expanded.text === spacedText &&
+            expanded.request === before.request &&
+            !expanded.busy &&
+            received.length === 1,
+          "spacing change sent another request or changed the text",
+        );
+        await capture(session, "line-spacing-137");
+
+        await nativeResize(session, 440, 180);
+        const manualSize = dimensions(hwnd);
+        sendMessage(edit, WM_MOUSEWHEEL, -120 << 16, 0);
+        assert(Number(sendMessage(edit, EM_GETFIRSTVISIBLELINE, 0, 0)) > 0, "larger line spacing prevented scrolling");
+        const manual = await openConfig(session);
+        sendText(manual.field("lineSpacing"), "200");
+        await closeConfig(manual, true);
+        const changed = await waitState(
+          session,
+          (value) => value.lineSpacing === 200,
+          "manual popup did not apply line spacing",
+        );
+        assert(
+          sameSize(dimensions(hwnd), manualSize) &&
+            changed.linePitch > expanded.linePitch &&
+            changed.request === before.request &&
+            received.length === 1,
+          "line spacing changed the manual window size or request",
+        );
+        sendMessage(edit, WM_MOUSEWHEEL, 120 << 16, 0);
+        assert(Number(sendMessage(edit, EM_GETFIRSTVISIBLELINE, 0, 0)) === 0, "mouse wheel did not return to the top");
+        const minimum = await openConfig(session);
+        sendText(minimum.field("lineSpacing"), "1");
+        await closeConfig(minimum, true);
+        const tightest = await state(session.client);
+        assert(tightest.lineSpacing === 1 && tightest.linePitch >= 1, "minimum spacing did not keep a positive pitch");
+        const restore = await openConfig(session);
+        sendText(restore.field("lineSpacing"), "100");
+        await closeConfig(restore, true);
+        const restored = await state(session.client);
+        assert(
+          restored.lineSpacing === 100 && restored.linePitch === before.linePitch,
+          "single spacing was not restored",
+        );
+      },
+      { reply: () => chat(spacedText), settings: ["TranslatePopupMaxHeight = 90"] },
     );
 
     const chunks = Array.from(
@@ -950,6 +1151,7 @@ export async function testit(): Promise<void> {
       const form = await openConfig(session);
       for (const [name, values, valid] of [
         ["fontSize", ["7", "33", "11oops"], "11"],
+        ["lineSpacing", ["", "0", "-5", "201", "83oops"], "83"],
         ["width", ["329", "1601"], "460"],
         ["maxHeight", ["29", "91"], "70"],
       ] as [keyof typeof TranslateControl, string[], string][]) {
@@ -980,6 +1182,7 @@ export async function testit(): Promise<void> {
         const form = await openConfig(session);
         selectCombo(form.field("font"), /^Segoe UI$/i);
         sendText(form.field("fontSize"), "15");
+        sendText(form.field("lineSpacing"), "83%");
         sendText(form.field("maxHeight"), "65");
         await closeConfig(form, true);
         await nativeResize(session, 440, 310);
@@ -988,6 +1191,7 @@ export async function testit(): Promise<void> {
           () => (existsSync(settingsPath) ? readFileSync(settingsPath, "utf8") : ""),
           (text) =>
             /TranslatePopupFontSize\s*=\s*15\b/.test(text) &&
+            /TranslatePopupLineSpacing\s*=\s*83\b/.test(text) &&
             /TranslatePopupAutoSize\s*=\s*false\b/.test(text) &&
             /TranslatePopupWidth\s*=\s*440\b/.test(text) &&
             /TranslatePopupHeight\s*=\s*310\b/.test(text) &&
@@ -1005,6 +1209,7 @@ export async function testit(): Promise<void> {
           const reloaded = await expectText(restarted);
           assert(
             reloaded.fontSize === 15 &&
+              reloaded.lineSpacing === 83 &&
               !reloaded.autoSize &&
               reloaded.preferredWidth === 440 &&
               reloaded.preferredHeight === 310,
@@ -1021,6 +1226,7 @@ export async function testit(): Promise<void> {
           const reloadedForm = await openConfig(restarted);
           assert(
             getControlText(reloadedForm.field("font")) === "Segoe UI" &&
+              getControlText(reloadedForm.field("lineSpacing")) === "83%" &&
               getControlText(reloadedForm.field("maxHeight")) === "65",
             "font family or automatic height limit failed to reload",
           );
@@ -1033,6 +1239,7 @@ export async function testit(): Promise<void> {
               {
                 fontFamily: true,
                 fontSize: true,
+                lineSpacing: true,
                 manualMode: true,
                 logicalWidth: true,
                 logicalHeight: true,

@@ -3353,10 +3353,19 @@ static RegenerateThumbnailsData* NewRegenerateThumbnailsData(ThumbnailsToMake wh
     return data;
 }
 
-// whether it's in our thumbnail cache, a local folder: cheap to check up front
+// Cover settings can change between runs. Check the PNG dimensions without
+// decoding the image, so an old cover format does not block regeneration.
 static bool HasCachedThumbnail(Str path) {
     TempStr thumbPath = GetThumbnailPathTemp(path);
-    return len(thumbPath) == 0 || file::Exists(thumbPath);
+    if (len(thumbPath) == 0) {
+        return true;
+    }
+    u8 header[24]; // PNG signature, IHDR length and type, width and height
+    int n = file::ReadN(thumbPath, header, sizeof(header));
+    if (n != dimofi(header)) {
+        return false;
+    }
+    return ThumbnailSizeMatchesType(PngSizeFromData(Str((const char*)header, n)));
 }
 
 // can be slow: a drive that's away (unplugged, offline share) waits out a timeout

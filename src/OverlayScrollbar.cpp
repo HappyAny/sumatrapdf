@@ -10,6 +10,8 @@
 #include "OverlayScrollbarCommon.h"
 
 constexpr const WCHAR* kOverlayScrollbarClass = L"SUMATRA_OVERLAY_SCROLLBAR";
+constexpr Color kThinThumbColor = RGB(120, 120, 120);
+constexpr Color kThinThumbHoverColor = RGB(90, 90, 90);
 
 static bool gScrollbarClassRegistered = false;
 
@@ -176,6 +178,9 @@ static void PaintScrollbar(OverlayScrollbar* sb) {
 
     Rect thumbRc = GetThumbRect(sb);
     Color thumbCol = sb->mouseOverThumb ? ThemeThumbHoverColor() : ThemeThumbColor();
+    if (sb->mode == OverlayScrollbar::Mode::Thin) {
+        thumbCol = sb->mouseOverThumb || sb->isDragging ? kThinThumbHoverColor : kThinThumbColor;
+    }
 
     if (!IsThick(sb)) {
         int thinW = ScaledWidth(sb, false);
@@ -339,7 +344,11 @@ void SetState(OverlayScrollbar* sb, State newState) {
         // Make fully transparent instead of ShowWindow(SW_HIDE) because
         // SW_HIDE can trigger Z-order changes that hide other popups
         sb->mouseOverThumb = false;
-        MakeLayeredWindowTransparent(sb->hwnd);
+        if (sb->mode == OverlayScrollbar::Mode::Thin) {
+            OverlayScrollbarHide(sb);
+        } else {
+            MakeLayeredWindowTransparent(sb->hwnd);
+        }
     }
 
     KillTimer(sb->hwnd, OverlayScrollbar::kTimerAutoHide);
@@ -380,7 +389,7 @@ static void CALLBACK MouseTrackTimerProc(HWND /*hwnd*/, UINT /*msg*/, UINT_PTR /
             continue;
         }
 
-        if (!IsActive(sb)) {
+        if (!IsActive(sb) || sb->mode == OverlayScrollbar::Mode::Thin) {
             continue;
         }
 
@@ -474,6 +483,7 @@ static void EndScrollbarPress(OverlayScrollbar* sb) {
         PaintScrollbar(sb);
         SendScrollMsg(sb, ScrollMsgForType(sb), MAKEWPARAM(SB_THUMBPOSITION, sb->nPos));
     }
+    if (sb->mode == OverlayScrollbar::Mode::Thin) RestartSmartThinAutoHide(sb);
 }
 
 static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
@@ -536,7 +546,8 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
 
             // Thumb hover is handled by the global tracker, but also handle here
             // for responsiveness when already thick
-            if (IsThick(sb)) {
+            if (sb->mode == OverlayScrollbar::Mode::Thin) OverlayScrollbarNotifyScroll(sb);
+            if (IsThick(sb) || sb->mode == OverlayScrollbar::Mode::Thin) {
                 Rect thumbRc = GetThumbRect(sb);
                 bool wasOver = sb->mouseOverThumb;
                 sb->mouseOverThumb = thumbRc.Contains(Point(mx, my));
@@ -648,7 +659,7 @@ static LRESULT CALLBACK WndProcOverlayScrollbar(HWND hwnd, UINT msg, WPARAM wp, 
 
         case WM_NCHITTEST: {
             // pass through rightmost 2px of vertical scrollbar for frame resize
-            if (IsVert(sb)) {
+            if (IsVert(sb) && sb->mode != OverlayScrollbar::Mode::Thin) {
                 int x = GET_X_LPARAM(lp);
                 Rect rc = HwndWindowRect(hwnd);
                 if ((rc.x + rc.dx - x) <= 2) {
@@ -702,6 +713,10 @@ OverlayScrollbar* OverlayScrollbarCreate(HWND hwndOwner, OverlayScrollbar::Type 
     HWND hwndTopLevel = GetAncestor(hwndOwner, GA_ROOT);
     sb->hwnd = CreateWindowExW(exStyle, kOverlayScrollbarClass, nullptr, style, 0, 0, 1, 1, hwndTopLevel, nullptr,
                                GetModuleHandleW(nullptr), nullptr);
+    if (!sb->hwnd) {
+        delete sb;
+        return nullptr;
+    }
     SetWindowLongPtrW(sb->hwnd, GWLP_USERDATA, (LONG_PTR)sb);
 
     // Register for global mouse tracking
@@ -846,7 +861,10 @@ void OverlayScrollbarUpdatePos(OverlayScrollbar* sb) {
     } else {
         swpFlags |= SWP_NOZORDER;
     }
+    Size before;
+    if (sb->mode == OverlayScrollbar::Mode::Thin && IsVisible(sb)) before = HwndWindowRect(sb->hwnd).Size();
     SetWindowPos(sb->hwnd, insertAfter, x, y, w, h, swpFlags);
+    if (sb->mode == OverlayScrollbar::Mode::Thin && IsVisible(sb) && before != Size(w, h)) PaintScrollbar(sb);
 }
 
 // Hide the scrollbar window without stealing activation from other windows.
@@ -868,7 +886,13 @@ void OverlayScrollbarShow(OverlayScrollbar* sb, bool show) {
         if (!IsActive(sb)) {
             return;
         }
+        if (sb->mode == OverlayScrollbar::Mode::Thin && GetCapture() == sb->hwnd) ReleaseCapture();
         SetState(sb, State::Hidden);
+        return;
+    }
+
+    if (sb->mode == OverlayScrollbar::Mode::Thin) {
+        if (!IsActive(sb)) SetState(sb, State::SmartInvisible);
         return;
     }
 

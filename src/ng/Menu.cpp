@@ -52,182 +52,6 @@
 #include "SumatraLog.h"
 
 // clang-format off
-//[ ACCESSKEY_GROUP Context Menu (Selection)
-static MenuDef menuDefSelection[] = {
-    {
-        TrN("Select &All"),
-        CmdSelectAll,
-    },
-    {
-        TrN("&Copy To Clipboard"),
-        CmdCopySelection,
-    },
-    {
-        TrN("Copy As &Image To Clipboard"),
-        CmdCopySelectionAsImage,
-    },
-    {
-        TrN("&Save As Image..."),
-        CmdSaveSelectionAsImage,
-    },
-    {
-        TrN("&Print Selection..."),
-        CmdPrintSelection,
-    },
-    {
-        TrN("Visual Search With Google &Lens"),
-        CmdSearchGoogleLens,
-    },
-    {
-        TrN("&Zoom To Selection"),
-        CmdZoomToSelection,
-    },
-    {
-        TrN("Count &Words"),
-        CmdCountWords,
-    },
-    {
-        TrN("Show Selected Te&xt"),
-        CmdShowSelectedText,
-    },
-    {
-        StrL(kMenuSeparator),
-        kMenuSeparatorID,
-    },
-    {
-        TrN("&Translate with"),
-        (UINT_PTR)menuDefTranslateWith,
-    },
-    {
-        TrN("S&earch with"),
-        (UINT_PTR)menuDefSearchWith,
-    },
-    {
-        TrN("Select C&urrent Page"),
-        CmdSelectCurrentPage,
-    },
-    {
-        TrN("Select &All"),
-        CmdSelectAll,
-    },
-    {
-        {},
-        0,
-    },
-};
-//] ACCESSKEY_GROUP Context Menu (Selection)
-
-//[ ACCESSKEY_GROUP Context Menu (Main)
-static MenuDef menuDefContext[] = {
-    {
-        TrN("S&election"),
-        (UINT_PTR)menuDefSelection,
-    },
-    {
-        TrN("Visual Search With Google &Lens"),
-        (UINT_PTR)menuDefGoogleLens,
-    },
-    {
-        TrN("Copy Link &Address"),
-        CmdCopyLinkTarget,
-    },
-    {
-        TrN("Copy Co&mment"),
-        CmdCopyComment,
-    },
-    {
-        TrN("Sho&w Comment"),
-        CmdShowAnnotationText,
-    },
-    {
-        TrN("Save Attachment"),
-        CmdSaveAttachment,
-    },
-    {
-        TrN("Selected &Image"),
-        (UINT_PTR)menuDefContextImage,
-    },
-    // note: strings cannot be "" or else items are not there
-    {
-        StrL("Add to favorites"),
-        CmdFavoriteAdd,
-    },
-    {
-        StrL("Remove from favorites"),
-        CmdFavoriteDel,
-    },
-    {
-        TrN("Show &Favorites"),
-        CmdFavoriteToggle,
-    },
-    {
-        TrN("Show &Bookmarks"),
-        CmdToggleBookmarks,
-    },
-    {
-        TrN("Sh&ow Toolbar"),
-        CmdToggleToolbar,
-    },
-    {
-        TrN("Show Caption"),
-        CmdToggleCaption,
-    },
-    {
-        TrN("Auto-hide Sidebar"),
-        CmdToggleSidebarAutoHide,
-    },
-    {
-        StrL(kMenuSeparator),
-        kMenuSeparatorID,
-    },
-    {
-        TrN("AI chat with document using"),
-        (UINT_PTR)menuDefDocumentAIChat,
-    },
-    {
-        TrN("Document"),
-        (UINT_PTR)menuDefDocumentOperations,
-    },
-    {
-        TrN("Read Aloud"),
-        (UINT_PTR)menuDefContextReadAloud,
-    },
-    {
-        TrN("Annotations"),
-        (UINT_PTR)menuDefContextAnnotations,
-    },
-    {
-        TrN("Show Errors"),
-        CmdShowErrors,
-    },
-    {
-        TrN("E&xit Fullscreen"),
-        CmdToggleFullscreen, // only seen in full-screen mode
-    },
-    {
-        {},
-        0,
-    },
-};
-//] ACCESSKEY_GROUP Context Menu (Main)
-
-// clang-format on
-
-// clang-format off
-// translate / search selection commands need selected text to operate on
-static uintptr_t selectionTextCmds[] = {
-    CmdTranslateSelectionWithGoogle,
-    CmdTranslateSelectionWithDeepL,
-    CmdTranslateSelectionWithGrokBuild,
-    CmdTranslateSelectionWithClaudeCode,
-    CmdTranslateSelectionWithOpenAICodex,
-    CmdTranslateSelectionWithAntiGravity,
-    CmdSearchSelectionWithGoogle,
-    CmdSearchSelectionWithBing,
-    CmdSearchSelectionWithWikipedia,
-    CmdSearchSelectionWithGoogleScholar,
-};
-
 static uintptr_t menusNoTranslate[] = {
     CmdZoom6400,
     CmdZoom3200,
@@ -406,6 +230,10 @@ void RemoveBadMenuSeparators(MenuModel* menu) {
     }
 }
 
+static Str MenuShortcut(int cmdId) {
+    return str::Dup(ParseMenuAccelTextTemp(ShortcutsForCmdTemp(cmdId, 1)).display);
+}
+
 // orig's AppendCommandsToMenu: the custom commands with a given origId
 static void AppendCommandsToMenu(MenuModel* menu, const Vec<CustomCommand*>& cmds, bool isEnabled) {
     for (CustomCommand* cmd : cmds) {
@@ -417,7 +245,7 @@ static void AppendCommandsToMenu(MenuModel* menu, const Vec<CustomCommand*>& cmd
         item->titleOwned = true;
         item->cmdId = cmd->id;
         item->disabled = !isEnabled;
-        item->accel = str::Dup(ShortcutsForCmdTemp(cmd->id, 1));
+        item->accel = MenuShortcut(cmd->id);
     }
 }
 
@@ -505,12 +333,45 @@ static void AppendExternalViewersToMenu(MenuModel* menu, Str filePath) {
         item->titleOwned = true;
         item->cmdId = cmd->id;
         item->disabled = len(filePath) == 0;
+        item->accel = MenuShortcut(cmd->id);
     }
+}
+
+static bool HasCustomZoomLevels() {
+    auto* levels = gSettings->zoomLevels;
+    auto* ids = gSettings->zoomLevelsCmdIds;
+    return levels && ids && len(*ids) > 0 && len(*levels) == len(*ids);
+}
+
+static void AppendCustomZoomLevels(MenuModel* menu) {
+    auto* levels = gSettings->zoomLevels;
+    auto* ids = gSettings->zoomLevelsCmdIds;
+    for (int i = len(*levels) - 1; i >= 0; i--) {
+        int cmdId = (*ids)[i];
+        MenuAppendString(menu, ZoomLevelStr((*levels)[i]), cmdId);
+        menu->items[menu->items.len - 1].accel = MenuShortcut(cmdId);
+    }
+}
+
+static int CustomZoomCmdId(float zoom) {
+    if (zoom <= 0 || !HasCustomZoomLevels()) {
+        return 0;
+    }
+    auto* levels = gSettings->zoomLevels;
+    constexpr float kZoomFuzz = 0.01f;
+    for (int i = 0; i < len(*levels); i++) {
+        float level = (*levels)[i];
+        if (zoom + kZoomFuzz >= level && zoom - kZoomFuzz <= level) {
+            return (*gSettings->zoomLevelsCmdIds)[i];
+        }
+    }
+    return 0;
 }
 
 MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
     MenuModel* menu = new MenuModel();
     bool isDebugMenu = menuDef == menuDefDebug;
+    bool customZoom = menuDef == menuDefZoom && (!ctx || ctx->isDocLoaded) && HasCustomZoomLevels();
     int i = 0;
     bool addExternalViewersNext = false;
 
@@ -526,6 +387,9 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
         i++;
 
         int cmdId = (int)md.idOrSubmenu;
+        if (customZoom && cmdIdInList(menusNoTranslate)) {
+            continue;
+        }
         // orig appends the user's external viewers after CmdOpenWithHtmlHelp
         if (addExternalViewersNext && ctx) {
             WindowTab* evTab = ctx->tab;
@@ -540,7 +404,7 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
             // handlers run on selected text; comics and images have none
             bool canSelectText = !ctx || !ctx->isImageCollection;
             if (canSelectText && menuDef == menuDefMainSelection) {
-                AppendSelectionHandlersToMenu(menu, true);
+                AppendSelectionHandlersToMenu(menu, !ctx || ctx->hasSelection);
             } else if (canSelectText && menuDef == menuDefSelection) {
                 AppendSelectionHandlersToMenu(menu, ctx ? ctx->hasSelection : false);
             }
@@ -572,12 +436,26 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
             GetCommandIdState(ctx, cmdId, &removeMenu, &disableMenu);
         }
         if (ctx) {
-            removeMenu |= (menuDef == menuDefMainSelection) && !ctx->hasTextSelection && cmdIdInList(selectionTextCmds);
+            removeMenu |= !ctx->isCursorOnPage && subMenuDef == menuDefCreateAnnotUnderCursor;
+            bool canMarkUp = ctx->hasTextSelection || ctx->hasDrawnRectSelection;
+            removeMenu |= (!canMarkUp || !ctx->supportsAnnots) && subMenuDef == menuDefCreateAnnotFromSelection;
             // in the context menu only show translate / search items for a text
             // selection (the menubar variant is live-updated via
             // SetMenuStateForSelection instead)
             bool isTextSelSubMenu = (subMenuDef == menuDefTranslateWith) || (subMenuDef == menuDefSearchWith);
             removeMenu |= (menuDef == menuDefSelection) && !ctx->hasTextSelection && isTextSelSubMenu;
+            if (menuDef == menuDefSelection) {
+                removeMenu |= !ctx->hasSelection && cmdId == CmdCopySelection;
+                bool isRectSel = ctx->hasSelection && !ctx->hasTextSelection;
+                if (!isRectSel) {
+                    removeMenu |= cmdId == CmdCopySelectionAsImage || cmdId == CmdSaveSelectionAsImage ||
+                                  cmdId == CmdPrintSelection || cmdId == CmdSearchGoogleLens ||
+                                  cmdId == CmdZoomToSelection;
+                }
+            }
+            if (menuDef == menuDefGoogleLens) {
+                removeMenu |= cmdId == CmdSearchGoogleLens && !ctx->hasSelection;
+            }
         }
         removeMenu |= !isSubMenu && cmdId == CmdSignWithImage && len(gSettings->annotations.signatureImage) == 0;
         removeMenu |= ((subMenuDef == menuDefDebug) && !ShowDebugMenu());
@@ -624,6 +502,10 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
             item->title = title;
             item->cmdId = cmdId;
             item->disabled = disableMenu;
+            if (ctx && !ctx->allowsPrinting && cmdId == CmdPrint) {
+                item->title = Tr("&Print... (denied)");
+                continue;
+            }
             // Ctrl+C / Ctrl+V are bound to CmdCopySelection and
             // CmdPasteClipboardImage, which hand off to these.
             int accelCmd = cmdId;
@@ -632,17 +514,28 @@ MenuModel* BuildMenuFromDef(MenuDef* menuDef, BuildMenuCtx* ctx) {
             } else if (cmdId == CmdPasteAnnotation) {
                 accelCmd = CmdPasteClipboardImage;
             }
-            item->accel = str::Dup(ShortcutsForCmdTemp(accelCmd, 1));
+            item->accel = MenuShortcut(accelCmd);
         }
     }
     RemoveBadMenuSeparators(menu);
+    if (customZoom) {
+        AppendCustomZoomLevels(menu);
+    }
     return menu;
 }
 
-// ng: orig checks the radio items through MENUITEMINFO; here the model carries
-// the flag and the shell draws the tick
+static bool CanCloseDocument() {
+    for (MainWindow* win : gWindows) {
+        if (win->IsDocLoaded()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
     DocController* ctrl = win->ctrl;
+    DisplayModel* dm = win->AsFixed();
     DisplayMode displayMode = gSettings->defaultDisplayModeEnum;
     if (ctrl) {
         displayMode = ctrl->GetDisplayMode();
@@ -655,7 +548,13 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
     } else if (IsBookView(displayMode)) {
         layoutCmd = CmdBookView;
     }
-    int zoomCmd = ctrl ? CmdIdFromVirtualZoom(ctrl->GetZoomVirtual()) : 0;
+    float zoom = ctrl ? ctrl->GetZoomVirtual() : 0.f;
+    int zoomCmd = ctrl ? CustomZoomCmdId(zoom) : 0;
+    if (ctrl && zoomCmd == 0) {
+        zoomCmd = CmdIdFromVirtualZoom(zoom);
+    }
+    bool actualSize =
+        zoomCmd == CmdZoomActualSize || zoomCmd == CmdZoom100 || (zoomCmd != 0 && zoomCmd == CustomZoomCmdId(100.f));
 
     for (MenuItemModel& it : menu->items) {
         if (it.submenu) {
@@ -663,6 +562,14 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
             continue;
         }
         if (it.cmdId == 0) {
+            continue;
+        }
+        if (it.cmdId == CmdClose) {
+            it.disabled = !CanCloseDocument();
+            continue;
+        }
+        if (it.cmdId == CmdPrint) {
+            it.disabled |= !ctrl;
             continue;
         }
         if (it.cmdId == CmdNavigateBack) {
@@ -681,7 +588,7 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
             it.checked = true;
             continue;
         }
-        if (it.cmdId >= CmdViewLayoutFirst && it.cmdId <= CmdViewLayoutLast) {
+        if (it.cmdId == CmdSinglePageView || it.cmdId == CmdFacingView || it.cmdId == CmdBookView) {
             it.checked = it.cmdId == layoutCmd;
             continue;
         }
@@ -689,13 +596,37 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
             it.checked = IsContinuous(displayMode);
             continue;
         }
+        if (it.cmdId == CmdToggleMangaMode) {
+            it.checked = dm && dm->GetDisplayR2L();
+            continue;
+        }
+        if (it.cmdId == CmdToggleUniformPageWidth) {
+            it.checked = dm && dm->GetUniformPageWidth();
+            continue;
+        }
+        if (it.cmdId == CmdToggleTrimEmptyMargins) {
+            it.checked = dm && dm->GetTrimEmptyMargins();
+            continue;
+        }
+        if (it.cmdId == CmdShowWholePages) {
+            it.disabled = !dm || dm->GetUserCrop().IsEmpty();
+            continue;
+        }
+        if (it.cmdId == CmdToggleReadColumns) {
+            it.checked = dm && dm->GetReadColumns();
+            continue;
+        }
+        if (it.cmdId == CmdToggleColumnsWholePage) {
+            it.disabled = !dm || !dm->GetReadColumns();
+            it.checked = dm && dm->ShowsColumnsWholePage();
+            continue;
+        }
         if (it.cmdId == CmdToggleAutoRotateWidePages) {
             it.checked = gSettings && gSettings->comicBookUI.autoRotateWidePages;
             continue;
         }
         if (it.cmdId == CmdToggleMirror) {
-            DisplayModel* dmMirror = win->AsFixed();
-            it.checked = dmMirror && dmMirror->GetMirror();
+            it.checked = dm && dm->GetMirror();
             continue;
         }
         if (it.cmdId == CmdTogglePageGrid) {
@@ -704,6 +635,15 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
         }
         if (it.cmdId == CmdToggleCaption) {
             it.checked = gSettings->showCaption;
+            continue;
+        }
+        if (it.cmdId == CmdToggleToolbar) {
+            it.checked =
+                win->IsFullScreen() ? FullscreenToolbarModeFromPrefs() != kToolbarHide : !ToolbarModeIsHidden();
+            continue;
+        }
+        if (it.cmdId == CmdToggleMenuBar) {
+            it.checked = gSettings->showMenubar;
             continue;
         }
         if (it.cmdId == CmdToggleSidebarAutoHide) {
@@ -722,12 +662,25 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
             it.checked = SidebarContentVisible(win, SidebarContent::Favorites);
             continue;
         }
+        if (it.cmdId == CmdFavoriteAdd || it.cmdId == CmdFavoriteDel) {
+            // The original enables both when it updates the rebuilt document menu.
+            it.disabled = !ctrl;
+            continue;
+        }
+        if (it.cmdId == CmdFavoriteShowInTab) {
+            it.checked = FindFavoritesTab(win) != nullptr;
+            continue;
+        }
         if (it.cmdId == CmdToggleLinks) {
             it.checked = gSettings->showLinks;
             continue;
         }
         if (it.cmdId == CmdTogglePageBoxes) {
             it.checked = win->showPageBoxes;
+            continue;
+        }
+        if (it.cmdId == CmdToggleHighlightFormFields) {
+            it.checked = gSettings->highlightFormFields;
             continue;
         }
         if (it.cmdId == CmdToggleTransparencyGrid) {
@@ -754,8 +707,12 @@ static void SetMenuChecks(MenuModel* menu, MainWindow* win) {
             it.checked = gSettings && gSettings->readingBar.invert;
             continue;
         }
-        if (ctrl && it.cmdId >= CmdZoomFirst && it.cmdId <= CmdZoomLast) {
-            it.checked = it.cmdId == zoomCmd;
+        if (ctrl && it.cmdId == CmdZoomActualSize) {
+            it.checked = actualSize;
+        } else if (ctrl && it.cmdId == CmdZoom100) {
+            it.checked = zoomCmd == CmdZoomActualSize || zoomCmd == CmdZoom100;
+        } else if (ctrl && it.cmdId == zoomCmd) {
+            it.checked = (zoomCmd >= CmdZoomFirst && zoomCmd <= CmdZoomLast) || zoomCmd > CmdLast;
         }
     }
 }
@@ -1286,7 +1243,7 @@ void HomeContextMenuCommand(MainWindow* win, Str filePathIn, int cmdId) {
 // so the choice is remembered. ng: showTemporarily (Alt alone) has nothing to
 // do here, the Alt access keys are handled by the shell.
 void ToggleMenuBar(MainWindow* win, bool showTemporarily) {
-    if (showTemporarily) {
+    if (showTemporarily || win->InPresentation()) {
         return;
     }
     if (win->IsFullScreen()) {

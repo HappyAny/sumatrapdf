@@ -6,7 +6,6 @@
 #include "LlmRequestOptions.h"
 #include "LlmTranslate.h"
 
-constexpr int kLlmSourceLimit = 256 * 1024;
 constexpr int kLlmResponseLimit = 8 * 1024 * 1024;
 constexpr int kLlmEventLimit = 1024 * 1024;
 constexpr int kLlmTextLimit = 2 * 1024 * 1024;

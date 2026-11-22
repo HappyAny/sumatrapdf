@@ -1,8 +1,11 @@
 /* License: GPL-3.0-only */
 
 #include "base/Base.h"
+#include "gui/Dpi.h"
+#if OS_WIN && !defined(SUMATRA_NG)
 #include "base/Win.h"
 #include <dwmapi.h>
+#endif
 #include "TranslateAnchor.h"
 
 constexpr int kCalloutGap = 12;
@@ -12,8 +15,10 @@ constexpr int kArrowHalfBase = 8;
 constexpr int kArrowCornerInset = 8;
 constexpr int kArrowMaxLength = 40;
 constexpr int kArrowMaxSkew = 24;
+#if OS_WIN && !defined(SUMATRA_NG)
 constexpr Color kArrowColorKey = RGB(255, 0, 255);
 constexpr WCHAR kArrowClass[] = L"SumatraTranslateArrow";
+#endif
 
 static int AnchorScale(int value, int dpi) {
     dpi = dpi > 0 ? std::min(dpi, 768) : 96;
@@ -228,6 +233,7 @@ TranslateCallout PlaceTranslateCallout(Rect anchor, Size popupSize, Rect work, T
     return best.popup.IsEmpty() ? normal : best;
 }
 
+#if OS_WIN && !defined(SUMATRA_NG)
 struct TranslateArrow {
     HWND owner = nullptr;
     HWND hwnd = nullptr;
@@ -341,8 +347,10 @@ static Rect ArrowFrameRect(HWND owner) {
     return Rect(outer);
 }
 
-static bool ArrowVertices(TranslateArrow* arrow, const TranslateCallout& callout, Rect work, Rect toolbar, int dpi) {
-    Rect frame = ArrowFrameRect(arrow->owner);
+#endif
+
+bool MeasureTranslateArrow(const TranslateCallout& callout, Rect frame, Rect work, Rect toolbar, int dpi,
+                           TranslateArrowShape& out) {
     if (frame.dx <= 0 || frame.dy <= 0) return false;
     int half = AnchorScale(kArrowHalfBase, dpi);
     int corner = AnchorScale(kArrowCornerInset, dpi);
@@ -359,8 +367,8 @@ static bool ArrowVertices(TranslateArrow* arrow, const TranslateCallout& callout
         if (length < AnchorScale(kCalloutMinGap, dpi) || length > AnchorScale(kArrowMaxLength, dpi) ||
             skew > AnchorScale(kArrowMaxSkew, dpi) || skew < -AnchorScale(kArrowMaxSkew, dpi))
             return false;
-        arrow->vertices[1] = {base.x, base.y - half};
-        arrow->vertices[2] = {base.x, base.y + half};
+        out.vertices[1] = {base.x, base.y - half};
+        out.vertices[2] = {base.x, base.y + half};
     } else {
         if (callout.side != TranslatePosition::Top && callout.side != TranslatePosition::Bottom) return false;
         if (frame.dx < 2 * (half + corner) + 1) return false;
@@ -371,25 +379,35 @@ static bool ArrowVertices(TranslateArrow* arrow, const TranslateCallout& callout
         if (length < AnchorScale(kCalloutMinGap, dpi) || length > AnchorScale(kArrowMaxLength, dpi) ||
             skew > AnchorScale(kArrowMaxSkew, dpi) || skew < -AnchorScale(kArrowMaxSkew, dpi))
             return false;
-        arrow->vertices[1] = {base.x - half, base.y};
-        arrow->vertices[2] = {base.x + half, base.y};
+        out.vertices[1] = {base.x - half, base.y};
+        out.vertices[2] = {base.x + half, base.y};
     }
-    arrow->vertices[0] = {target.x, target.y};
+    out.vertices[0] = target;
     int left = target.x, right = target.x;
     int top = target.y, bottom = target.y;
-    for (const POINT& point : arrow->vertices) {
-        left = std::min(left, (int)point.x);
-        right = std::max(right, (int)point.x);
-        top = std::min(top, (int)point.y);
-        bottom = std::max(bottom, (int)point.y);
+    for (Point point : out.vertices) {
+        left = std::min(left, point.x);
+        right = std::max(right, point.x);
+        top = std::min(top, point.y);
+        bottom = std::max(bottom, point.y);
     }
     Rect rect(left, top, right - left + 1, bottom - top + 1);
     if (rect.Intersect(work) != rect || !rect.Intersect(toolbar).IsEmpty()) return false;
-    arrow->rect = rect;
-    arrow->tip = target;
-    for (POINT& point : arrow->vertices) {
-        point.x -= left;
-        point.y -= top;
+    out.rect = rect;
+    return true;
+}
+
+#if OS_WIN && !defined(SUMATRA_NG)
+static bool ArrowVertices(TranslateArrow* arrow, const TranslateCallout& callout, Rect work, Rect toolbar, int dpi) {
+    Rect frame = ArrowFrameRect(arrow->owner);
+    TranslateArrowShape shape;
+    if (!MeasureTranslateArrow(callout, frame, work, toolbar, dpi, shape)) {
+        return false;
+    }
+    arrow->rect = shape.rect;
+    arrow->tip = shape.vertices[0];
+    for (int i = 0; i < dimofi(arrow->vertices); i++) {
+        arrow->vertices[i] = {shape.vertices[i].x - shape.rect.x, shape.vertices[i].y - shape.rect.y};
     }
     return true;
 }
@@ -430,3 +448,4 @@ bool TranslateArrowVisible(TranslateArrow* arrow) {
 Point TranslateArrowTip(TranslateArrow* arrow) {
     return TranslateArrowVisible(arrow) ? arrow->tip : Point();
 }
+#endif

@@ -8,6 +8,7 @@
 // gpui's.
 
 #include "gui/GpuiBridge.h"
+#include "VirtKeys.h"
 #include "base/File.h"
 #include "base/UITask.h"
 
@@ -110,6 +111,7 @@ struct HoverDumpItem {
 
 struct ToolbarUI {
     gp::Entity<ToolbarView> view;
+    int mainDy = 0;
     // laid-out rect of each built button, parallel to btnCmds
     Vec<gp::Bounds> btnBounds;
     // the command each slot carries, so a rect can be found by command id
@@ -152,6 +154,7 @@ struct ToolbarView {
     static void OnInkThickness(ToolbarView* self, gp::Ctx* cx, const gp::SliderEvent* ev);
     static void OnPageInput(ToolbarView* self, gp::Ctx* cx, const gp::InputEvent* ev);
     static void OnChapterInput(ToolbarView* self, gp::Ctx* cx, const gp::InputEvent* ev);
+    static void OnLocationKey(ToolbarView* self, gp::Ctx* cx, const gp::KeyEvent* ev);
     static void OnButtonUp(ToolbarView* self, gp::Ctx* cx, const gp::MouseUpEvent* ev, int64_t idx);
     static void OnBarWheel(ToolbarView* self, gp::Ctx* cx, const gp::ScrollWheelEvent* ev);
     static void OnStripHover(ToolbarView* self, gp::Ctx* cx, const gp::HoverEvent* ev);
@@ -210,10 +213,26 @@ static ToolbarUI* Ui(MainWindow* win) {
 
 // --- the API the rest of the app calls --------------------------------------
 
-void CreateToolbar(MainWindow* win) {
-    Toolbar* tb = Tb(win);
+static void UpdateToolbarMetrics(MainWindow* win, Toolbar* tb) {
+#if OS_WIN
+    int iconPx = RoundUp(AppShellDpiPx(win, gSettings->toolbarSize), 4);
+    int padPx = 6 + AppShellDpiPx(win, 2);
+    float dipPerPx = 96.f / (float)std::max(AppShellWindowDpi(win), 1);
+    tb->iconSize = (int)std::lround((float)iconPx * dipPerPx);
+    tb->rowDy = (int)std::lround((float)(iconPx + 2 * padPx) * dipPerPx);
+#else
+    (void)win;
     tb->iconSize = ToolbarIconSize();
     tb->rowDy = ToolbarRowDy(tb->iconSize);
+#endif
+}
+
+void CreateToolbar(MainWindow* win) {
+    Toolbar* tb = Tb(win);
+    UpdateToolbarMetrics(win, tb);
+    if (tb->ui) {
+        tb->ui->mainDy = 0;
+    }
     win->isToolbarVisible = ShouldShowToolbar(win);
     win->isToolbarOverlay = ShouldOverlayToolbar(win);
     PopulateToolbarLayout();
@@ -283,7 +302,8 @@ int ToolbarDy(MainWindow* win) {
     if (!win->isToolbarVisible || win->isToolbarOverlay) {
         return 0;
     }
-    return AnnotRowVisible(win) ? (2 * tb->rowDy) : tb->rowDy;
+    int mainDy = tb->ui && tb->ui->mainDy > 0 ? tb->ui->mainDy : tb->rowDy;
+    return mainDy + (AnnotRowVisible(win) ? tb->rowDy : 0);
 }
 
 // The row a document tab gets, for sizing a document while Home is current.
@@ -1239,8 +1259,13 @@ static void AddPageInfo(MainWindow* win, gp::Ctx* cx, gp::El* row) {
     // the group stands in for the page box when a rect is asked for
     int idx = len(ui->btnCmds);
     VecAppend(ui->btnCmds, PageInfoId);
-    gp::El* group =
-        gp::Div(cx->a)->FlexRow()->H((float)tb->rowDy)->Shrink0()->ItemsCenter()->BoundsOut(&ui->btnBounds[idx]);
+    gp::El* group = gp::Div(cx->a)
+                        ->FlexRow()
+                        ->H((float)tb->rowDy)
+                        ->Shrink0()
+                        ->ItemsCenter()
+                        ->BoundsOut(&ui->btnBounds[idx])
+                        ->CaptureKeyDown(gp::ListenTo(ui->view, &ToolbarView::OnLocationKey));
 
     auto text = [&](Str s, float padL, float padR) {
         return gp::TextEl(cx->a, GpuiDup(cx->a, s))->Font(13)->Fg(ToGpui(fg))->PadL(padL)->PadR(padR);
@@ -1314,7 +1339,7 @@ static void SyncLocationEdits(MainWindow* win) {
     SetEditText(tb->pageEdit, ctrl->GetPageLabeTemp(ctrl->CurrentPageNo()));
 }
 
-gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx) {
+gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx, int maxWidth) {
     Toolbar* tb = Tb(win);
     ToolbarUI* ui = Ui(win);
     if (!ui->view.IsValid()) {
@@ -1326,6 +1351,7 @@ gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx) {
         CreateToolbar(win);
     }
     bool floating = win->isToolbarOverlay;
+    UpdateToolbarMetrics(win, tb);
     if (!win->isToolbarVisible && !floating) {
         return nullptr;
     }
@@ -1338,6 +1364,7 @@ gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx) {
     PopulateCustomToolbarButtons();
     EnsureLocationEdit(win, &tb->pageEdit);
     EnsureLocationEdit(win, &tb->chapterEdit);
+    tb->pageEdit->validate = win->ctrl && win->ctrl->HasPageLabels() ? nullptr : IsAllDigits;
     tb->pageEdit->onChange = gp::ListenTo(ui->view, &ToolbarView::OnPageInput);
     tb->chapterEdit->onChange = gp::ListenTo(ui->view, &ToolbarView::OnChapterInput);
     ComputePageText(win, win->ctrl ? win->ctrl->PageCount() : 0);
@@ -1389,7 +1416,6 @@ gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx) {
     const gp::Theme& th = gp::ThemeNow(cx->app);
     // RTL packs the buttons to the right. The empty rest still drags the window.
     gp::El* row = gp::Div(cx->a)
-                      ->H((float)tb->rowDy)
                       ->Shrink0()
                       ->ItemsCenter()
                       ->PadX((float)DpiScale(4))
@@ -1401,8 +1427,10 @@ gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx) {
     } else {
         row->FlexRow();
     }
-    if (!floating) {
-        row->W(gp::kFill);
+    if (floating) {
+        row->H((float)tb->rowDy);
+    } else {
+        row->W(gp::kFill)->MinH((float)tb->rowDy)->FlexWrap();
     }
     for (int i = 0; i < n; i++) {
         const ToolbarButtonInfo& bi = GetToolbarButtonInfoByIdx(i);
@@ -1422,7 +1450,8 @@ gp::El* ToolbarBuild(MainWindow* win, gp::Ctx* cx) {
         row->Child(ToolbarButton(win, cx, len(ui->btnCmds) - 1, bi, enabled, IsCmdChecked(win, bi.cmdId)));
     }
     if (!floating) {
-        row->Child(gp::Div(cx->a)->Flex1()->H(gp::kFill)->Click(gp::ClickWinCaption));
+        row->Child(gp::Div(cx->a)->Flex1()->H((float)tb->rowDy)->Click(gp::ClickWinCaption));
+        ui->mainDy = (int)std::lround(gp::MeasureElAtWidth(&cx->win->paint, row, (float)std::max(maxWidth, 1)).h);
     }
 
     if (tb->wantPageFocus) {
@@ -1873,24 +1902,26 @@ void ToolbarView::OnBarWheel(ToolbarView* self, gp::Ctx* cx, const gp::ScrollWhe
     DocCanvasWheelFromFrame(self->win, cx, ev);
 }
 
-// orig's OnLocationEditChar: Enter goes to the page (or chapter + page)
-static void OnLocationInput(MainWindow* win, gp::Ctx* cx, const gp::InputEvent* ev, gp::InputState* edit) {
-    if (!IsMainWindowValidAndNotClosing(win) || !win->IsDocLoaded()) {
+// gpui places the caret after the Focus event, so select all on the next frame.
+static void OnLocationFocus(MainWindow* win, const gp::InputEvent* ev, gp::InputState* edit) {
+    if (ev->kind != gp::InputEventKind::Focus || !IsMainWindowValidAndNotClosing(win) || !win->IsDocLoaded()) {
         return;
     }
+    Tb(win)->wantSelectAll = edit;
+    AppShellInvalidate(win);
+}
+
+// Capture Enter before moving focus, so it cannot also scroll the document.
+void ToolbarView::OnLocationKey(ToolbarView* self, gp::Ctx* cx, const gp::KeyEvent* ev) {
+    if (ev->vk != VK_RETURN || ev->ctrl || ev->alt || ev->platform || ev->imeInProgress) {
+        return;
+    }
+    MainWindow* win = self->win;
+    if (!IsMainWindowValidAndNotClosing(win) || !win->IsDocLoaded() || !IsToolbarPageBoxFocused(win)) {
+        return;
+    }
+    const_cast<gp::KeyEvent*>(ev)->propagate = false;
     Toolbar* tb = Tb(win);
-    // orig creates both boxes with selectAllOnFocus, so typing replaces the
-    // page number instead of inserting into it
-    // ng: gpui places the caret from the click that focused the box, after the
-    // Focus event, so the selection has to be made on the next frame
-    if (ev->kind == gp::InputEventKind::Focus) {
-        tb->wantSelectAll = edit;
-        AppShellInvalidate(win);
-        return;
-    }
-    if (ev->kind != gp::InputEventKind::PressEnter) {
-        return;
-    }
     DocController* ctrl = win->ctrl;
     if (ShowChapterUi(ctrl)) {
         int chapter = ParseInt(FromGpui(gp::InputValue(tb->chapterEdit)));
@@ -1912,12 +1943,12 @@ static void OnLocationInput(MainWindow* win, gp::Ctx* cx, const gp::InputEvent* 
     gp::Notify(cx);
 }
 
-void ToolbarView::OnPageInput(ToolbarView* self, gp::Ctx* cx, const gp::InputEvent* ev) {
-    OnLocationInput(self->win, cx, ev, Tb(self->win)->pageEdit);
+void ToolbarView::OnPageInput(ToolbarView* self, gp::Ctx*, const gp::InputEvent* ev) {
+    OnLocationFocus(self->win, ev, Tb(self->win)->pageEdit);
 }
 
-void ToolbarView::OnChapterInput(ToolbarView* self, gp::Ctx* cx, const gp::InputEvent* ev) {
-    OnLocationInput(self->win, cx, ev, Tb(self->win)->chapterEdit);
+void ToolbarView::OnChapterInput(ToolbarView* self, gp::Ctx*, const gp::InputEvent* ev) {
+    OnLocationFocus(self->win, ev, Tb(self->win)->chapterEdit);
 }
 
 // --- the tick ---------------------------------------------------------------

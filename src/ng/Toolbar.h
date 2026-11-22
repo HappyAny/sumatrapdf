@@ -76,7 +76,7 @@ void EnablePdfAnnotationsToolbar(MainWindow*);
 void AnnotPresetColors(int cmdId, Vec<Color>& out);
 void SetAnnotPresetColor(int cmdId, Color col);
 
-gpui::El* ToolbarBuild(MainWindow*, gpui::Ctx*);
+gpui::El* ToolbarBuild(MainWindow*, gpui::Ctx*, int maxWidth);
 // what floats over the canvas: the zoom drop-down a zoom button opens
 gpui::El* ToolbarOverlayBuild(MainWindow*, gpui::Ctx*);
 

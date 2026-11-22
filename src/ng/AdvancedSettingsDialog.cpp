@@ -22,7 +22,6 @@
 
 #include "base/SettingsUtil.h"
 #include "base/File.h"
-#include "base/UITask.h"
 #include "gui/UIModels.h"
 
 #include "Settings.h"
@@ -53,28 +52,32 @@
 constexpr float kAdvQueryFontPx = 15;
 constexpr float kAdvTextFontPx = 13;
 constexpr float kAdvMetaFontPx = 12;
+constexpr float kAdvHintFontPx = 11;
 constexpr float kAdvRowDy = 24;
-constexpr float kAdvQueryDy = 40;
+constexpr float kAdvQueryDy = 33;
 constexpr float kAdvInsetDx = 8;
 constexpr float kAdvPadDx = 16;
 constexpr float kAdvGapDx = 8;
-constexpr float kAdvHintGapDx = 18;
+constexpr float kAdvHintGapDx = 16;
 constexpr float kAdvListPadDy = 4;
-constexpr float kAdvHelpDy = 104;
+constexpr float kAdvHelpDy = 120;
 constexpr float kAdvHelpPadDy = 8;
-constexpr float kAdvFootDy = 44;
+constexpr float kAdvFootDy = 38;
 constexpr float kAdvRadius = 4;
 constexpr int kAdvSelShift = 28;
 constexpr int kAdvFaintShift = 25;
 constexpr float kAdvHeaderPadB = 4;
 constexpr float kAdvSwatchDx = 12;
 constexpr float kAdvDotDx = 6;
-constexpr float kAdvValueDx = 240;
 constexpr float kAdvListDy = 360; // the list in a frame dialog
+constexpr float kAdvScrollbarDx = 10;
+constexpr float kAdvScrollbarThumbDx = 8;
+constexpr float kAdvScrollbarMinThumbDy = 20;
 constexpr int kAdvOverscanRows = 2;
 
 struct AdvancedSettingsDlg {
     MainWindow* win = nullptr;
+    MainWindow* reopenFrom = nullptr;
     bool visible = false;
     Vec<SettingItem*> items;
     Vec<SettingSection*> sections;
@@ -87,13 +90,17 @@ struct AdvancedSettingsDlg {
     gpui::InputState* editFilter = nullptr;
     gpui::InputState* editValue = nullptr;
     DialogSelect ddValue;
+    Str enumBeforeEdit;
+    gp::FocusHandle listFocus;
+    gp::FocusHandle openFileFocus;
+    gp::FocusHandle saveFocus;
+    gp::FocusHandle footerFocus;
     bool wantFocus = false;
     bool wantEditFocus = false;
+    bool wantListFocus = false;
     // orig's window, where the platform can have one (gui/ToolWindow.h);
     // null: a dialog in the frame
     ToolWindow* tw = nullptr;
-    // the list as laid out last frame in that window: it takes what is left
-    gpui::Bounds listBounds{};
 };
 
 static AdvancedSettingsDlg gAdv;
@@ -102,10 +109,10 @@ static AdvancedSettingsDlg gAdv;
 // earlier this session (dips)
 static Size gAdvLastClient;
 constexpr int kAdvSettingsMinClientDy = 320;
-// what is in the window besides the list, until a frame has measured it
-constexpr float kAdvWinChromeGuessDy = kAdvQueryDy + kAdvHelpDy + kAdvFootDy + 2 * kAdvListPadDy + 2;
+constexpr float kAdvWinChromeDy = kAdvQueryDy + kAdvHelpDy + kAdvFootDy + 2 * kAdvListPadDy + 2;
 
 static void AdvOpenToolWindow(MainWindow* win);
+static bool AdvToolOnCaptureKey(MainWindow*, gp::Ctx*, const gp::KeyEvent*);
 
 // orig's AdvSettingsItemColumns: the value column is about 45% of the row
 constexpr float kAdvColGap = 10;
@@ -117,7 +124,7 @@ static gp::Window* AdvHostWindow() {
     if (gAdv.tw) {
         return ToolWindowGpui(gAdv.tw);
     }
-    return gAdv.win ? gAdv.win->gpuiWin : nullptr;
+    return IsMainWindowValidAndNotClosing(gAdv.win) ? gAdv.win->gpuiWin : nullptr;
 }
 
 struct AdvancedSettingsView {
@@ -126,6 +133,7 @@ struct AdvancedSettingsView {
     static void OnOpenFile(AdvancedSettingsView* self, gp::Ctx* cx, const gp::ClickEvent*);
     static void OnHelp(AdvancedSettingsView* self, gp::Ctx* cx, const gp::ClickEvent*);
     static void OnFilter(AdvancedSettingsView* self, gp::Ctx* cx, const gp::InputEvent* ev);
+    static void OnCaptureKey(AdvancedSettingsView*, gp::Ctx* cx, const gp::KeyEvent* ev);
     static void OnRowClick(AdvancedSettingsView* self, gp::Ctx* cx, const gp::ClickEvent* ev, int64_t idx);
     static void OnEditInput(AdvancedSettingsView* self, gp::Ctx* cx, const gp::InputEvent* ev);
     static void OnScroll(AdvancedSettingsView* self, gp::Ctx* cx, const gp::ScrollEvent* ev);
@@ -157,14 +165,42 @@ bool IsAdvancedSettingsDialogVisible() {
 }
 
 // orig's CancelEditValue: the in-place editor goes away
-static void CancelEditValue() {
+static void CancelEditValue(bool restoreEnum = false) {
+    if (gAdv.editIdx < 0) {
+        return;
+    }
+    if (gAdv.editIsEnum && restoreEnum) {
+        SettingItem* item = gAdv.items[gAdv.editIdx];
+        str::ReplaceWithCopy(&item->strVal, gAdv.enumBeforeEdit);
+        SetItemChanged(item);
+        PreviewSettingChange(item);
+    }
     gAdv.editIdx = -1;
     gAdv.editIsEnum = false;
+    gAdv.wantEditFocus = false;
     gAdv.ddValue.Free();
+    str::ReplaceWithCopy(&gAdv.enumBeforeEdit, {});
+    gAdv.editValue->readonly = false;
+    gp::Window* host = gAdv.visible ? AdvHostWindow() : nullptr;
+    if (host && host->input == gAdv.editValue) {
+        gp::InputBlur(gAdv.editValue, host->app, host);
+        gAdv.wantListFocus = true;
+    }
+}
+
+static void UpdateEnumValue() {
+    if (!gAdv.editIsEnum || !gAdv.ddValue.TakeComboPicked()) {
+        return;
+    }
+    SettingItem* item = gAdv.items[gAdv.editIdx];
+    str::ReplaceWithCopy(&item->strVal, gAdv.ddValue.SelText());
+    SetItemChanged(item);
+    PreviewSettingChange(item);
 }
 
 // orig's CommitEditValue
 static void CommitEditValue() {
+    UpdateEnumValue();
     if (gAdv.editIdx < 0 || gAdv.editIsEnum) {
         CancelEditValue();
         return;
@@ -368,7 +404,11 @@ void CloseAdvancedSettingsDialog() {
     VecReset(gAdv.rows);
     gAdv.filterWords.Reset();
     gAdv.sel = -1;
-    AppShellInvalidate(win);
+    gAdv.win = nullptr;
+    // The tool-window close callback may run after its owner has closed.
+    if (IsMainWindowValidAndNotClosing(win)) {
+        AppShellInvalidate(win);
+    }
 }
 
 void ShowAdvancedSettingsDialog(MainWindow* win) {
@@ -379,13 +419,21 @@ void ShowAdvancedSettingsDialog(MainWindow* win) {
         return;
     }
     if (gAdv.visible) {
+        // The native window can be gone before its queued close callback runs.
+        if (gAdv.tw && !ToolWindowIsVisible(gAdv.tw)) {
+            gAdv.reopenFrom = win;
+            return;
+        }
         // orig: HwndSetFocus() on the one that is open
         ToolWindowActivate(gAdv.tw);
         return;
     }
     gAdv.win = win;
-    gAdv.listBounds = {};
     gp::App* app = win->gpuiWin ? win->gpuiWin->app : nullptr;
+    gAdv.listFocus = gp::FocusHandleNew(app);
+    gAdv.openFileFocus = gp::FocusHandleNew(app);
+    gAdv.saveFocus = gp::FocusHandleNew(app);
+    gAdv.footerFocus = gp::FocusHandleNew(app);
     gAdv.editFilter = new gp::InputState();
     gAdv.editFilter->focus = gp::FocusHandleNew(app);
     gp::InputSetPlaceholder(gAdv.editFilter, ToGpui(Tr("Filter settings")));
@@ -397,6 +445,7 @@ void ShowAdvancedSettingsDialog(MainWindow* win) {
     gAdv.scrollY = 0;
     gAdv.visible = true;
     gAdv.wantFocus = true;
+    gAdv.wantListFocus = false;
     AdvOpenToolWindow(win);
     if (gAdv.tw) {
         // orig's list starts without a selection
@@ -473,6 +522,8 @@ static void ActivateItem(int lbIdx) {
     }
     CommitEditValue();
     gAdv.editIdx = idx;
+    gp::InputSetValue(gAdv.editValue, ToGpui(FormatSettingValueTemp(item)));
+    gAdv.wantEditFocus = true;
     if (item->enumValues) {
         gAdv.editIsEnum = true;
         StrVec vals;
@@ -485,29 +536,27 @@ static void ActivateItem(int lbIdx) {
         }
         gAdv.ddValue.Init(gAdv.win && gAdv.win->gpuiWin ? gAdv.win->gpuiWin->app : nullptr);
         gAdv.ddValue.SetItems(vals, currSel);
+        str::ReplaceWithCopy(&gAdv.enumBeforeEdit, item->strVal);
+        gAdv.editValue->readonly = true;
+        gAdv.ddValue.OpenCombo();
         return;
     }
     gAdv.editIsEnum = false;
-    gp::InputSetValue(gAdv.editValue, ToGpui(FormatSettingValueTemp(item)));
-    gAdv.wantEditFocus = true;
 }
 
 static float AdvListViewDy() {
     if (!gAdv.tw) {
         return kAdvListDy;
     }
-    // the list takes what the window has left
-    float dy = gAdv.listBounds.h;
+    // The list takes what the window has left and shows only whole rows.
     gp::Window* host = AdvHostWindow();
-    if (dy <= 0 && host) {
-        dy = gp::WindowSize(host).dipH - kAdvWinChromeGuessDy;
-    }
-    return std::max(dy, kAdvRowDy);
+    float dy = host ? gp::WindowSize(host).dipH - kAdvWinChromeDy : kAdvListDy;
+    return std::max((float)(int)(dy / kAdvRowDy) * kAdvRowDy, kAdvRowDy);
 }
 
 // orig's VirtListBox::EnsureVisible, on whole rows
 static void AdvEnsureVisible() {
-    float viewDy = (float)(int)(AdvListViewDy() / kAdvRowDy) * kAdvRowDy;
+    float viewDy = AdvListViewDy();
     float maxY = std::max(0.f, (float)len(gAdv.rows) * kAdvRowDy - viewDy);
     if (gAdv.sel >= 0) {
         float top = (float)gAdv.sel * kAdvRowDy;
@@ -530,7 +579,7 @@ void AdvancedSettingsOnEscape() {
         return;
     }
     if (gAdv.editIdx >= 0) {
-        CancelEditValue();
+        CancelEditValue(true);
         AppShellInvalidate(gAdv.win);
         return;
     }
@@ -622,6 +671,7 @@ void AdvancedSettingsView::OnFilter(AdvancedSettingsView*, gp::Ctx* cx, const gp
     if (ev->kind != gp::InputEventKind::Change) {
         return;
     }
+    UpdateEnumValue();
     CancelEditValue();
     TempStr filter = str::DupTemp(FromGpui(gp::InputValue(gAdv.editFilter)));
     gAdv.filterWords.Reset();
@@ -637,7 +687,7 @@ void AdvancedSettingsView::OnFilter(AdvancedSettingsView*, gp::Ctx* cx, const gp
 }
 
 void AdvancedSettingsView::OnScroll(AdvancedSettingsView*, gp::Ctx* cx, const gp::ScrollEvent* ev) {
-    gAdv.scrollY = ev->offsetY;
+    gAdv.scrollY = (float)(int)(ev->offsetY / kAdvRowDy + 0.5f) * kAdvRowDy;
     gp::Notify(cx);
     AppShellInvalidate(gAdv.win);
 }
@@ -648,10 +698,14 @@ void AdvancedSettingsView::OnRowClick(AdvancedSettingsView*, gp::Ctx* cx, const 
     if (!RowItem((int)idx)) {
         return;
     }
+    if (gAdv.editIdx >= 0 && gAdv.sel == (int)idx) {
+        return;
+    }
     if (gAdv.sel != (int)idx) {
         CommitEditValue();
     }
     gAdv.sel = (int)idx;
+    gp::FocusHandleFocus(cx->win, gAdv.listFocus);
     if (ev->clickCount >= 2) {
         ActivateItem(gAdv.sel);
     }
@@ -750,7 +804,8 @@ static gp::El* AdvSettingRow(gp::Ctx* cx, int i, float valDx, Color colBg, Color
     row->Child(
         FilterHighlightText(cx, name, gAdv.filterWords, ToGpui(colText), kAdvTextFontPx)->Flex1()->MinW(0)->ClipX());
     if (editing && gAdv.editIsEnum) {
-        row->Child(gAdv.ddValue.Build(cx, StrL("adv-enum"), valDx));
+        row->Child(
+            gAdv.ddValue.BuildCombo(cx, StrL("adv-enum"), gAdv.editValue, valDx, false, kAdvRowDy, kAdvTextFontPx));
         return row;
     }
     if (editing) {
@@ -791,13 +846,15 @@ static gp::El* AdvSettingRow(gp::Ctx* cx, int i, float valDx, Color colBg, Color
 static gp::El* AdvList(gp::Ctx* cx, float viewDy, float rowDx) {
     Color colBg = ThemeWindowControlBackgroundColor();
     Color colText = ThemeWindowTextColor();
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
     int n = len(gAdv.rows);
-    gAdv.scrollY = std::max(0.f, std::min(gAdv.scrollY, std::max(0.f, (float)n * kAdvRowDy - viewDy)));
+    float contentDy = (float)n * kAdvRowDy;
+    gAdv.scrollY = std::max(0.f, std::min(gAdv.scrollY, std::max(0.f, contentDy - viewDy)));
     int first = std::max((int)(gAdv.scrollY / kAdvRowDy) - kAdvOverscanRows, 0);
     int last = std::min(first + (int)(viewDy / kAdvRowDy) + 1 + 2 * kAdvOverscanRows, n);
-    float valDx = AdvValueDx(rowDx - 2 * kAdvInsetDx);
-    gp::El* rows = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->PadX(kAdvInsetDx);
+    float barDx = contentDy > viewDy ? kAdvScrollbarDx : 0;
+    float valDx = AdvValueDx(rowDx - 4 * kAdvInsetDx - barDx);
+    gp::El* rows = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->PadR(barDx);
     if (first > 0) {
         rows->Child(gp::Div(cx->a)->W(gp::kFill)->H((float)first * kAdvRowDy)->Shrink0());
     }
@@ -812,19 +869,34 @@ static gp::El* AdvList(gp::Ctx* cx, float viewDy, float rowDx) {
     if (last < n) {
         rows->Child(gp::Div(cx->a)->W(gp::kFill)->H((float)(n - last) * kAdvRowDy)->Shrink0());
     }
-    return gp::Div(cx->a)
-        ->Id(GStrL("adv-list"))
-        ->FlexCol()
-        ->W(gp::kFill)
-        ->ScrollY(gAdv.scrollY)
-        ->ScrollFromPath()
-        ->OnScroll(gp::ListenTo(gAdvView, &AdvancedSettingsView::OnScroll))
-        ->Child(rows);
+    gp::El* list = gp::Div(cx->a)
+                       ->Id(GStrL("adv-list"))
+                       ->TrackFocus(gAdv.listFocus)
+                       ->TabStop(true)
+                       ->FocusOnPress()
+                       ->FlexCol()
+                       ->W(gp::kFill)
+                       ->H(viewDy)
+                       ->Shrink0()
+                       ->ScrollY(gAdv.scrollY)
+                       ->ScrollFromPath()
+                       ->ScrollMode(gp::ScrollbarMode::Always)
+                       ->OnScroll(gp::ListenTo(gAdvView, &AdvancedSettingsView::OnScroll))
+                       ->Child(rows);
+    gp::ScrollbarStyles styles;
+    styles.track = styles.track.Width(kAdvScrollbarDx).Bg(ToGpui(colBg));
+    styles.thumb = styles.thumb.Width(kAdvScrollbarThumbDx)
+                       .Inset(1)
+                       .Radius(0)
+                       .MinLength(kAdvScrollbarMinThumbDy)
+                       .Bg(ToGpui(AccentColor(colBg, 60)));
+    gp::Scrollbar::ApplyStyles(cx, list, styles);
+    return gp::Div(cx->a)->FlexCol()->W(gp::kFill)->PadX(kAdvInsetDx)->Child(list);
 }
 
 // the filter line: a bare input with the count at its right end
 static gp::El* AdvQueryLine(gp::Ctx* cx) {
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
     TempStr count = AdvSettingsCountTemp(CountSettingRows(gAdv.rows), len(gAdv.items));
     return gp::Div(cx->a)
         ->FlexRow()
@@ -846,7 +918,7 @@ static gp::El* AdvQueryLine(gp::Ctx* cx) {
 // the help strip: the selected setting's name and default over its doc comment
 static gp::El* AdvHelpStrip(gp::Ctx* cx) {
     Color colText = ThemeWindowTextColor();
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
     SettingItem* item = RowItem(gAdv.sel);
     gp::El* head = gp::Div(cx->a)->FlexRow()->W(gp::kFill)->ItemsCenter()->Gap(kAdvPadDx)->Shrink0();
     head->Child(gp::TextEl(cx->a, GpuiDup(cx->a, item ? item->name : Str{}))
@@ -881,7 +953,8 @@ static gp::El* AdvHelpStrip(gp::Ctx* cx) {
 // count, Cancel and Save on the right
 static gp::El* AdvFooter(gp::Ctx* cx) {
     Color colText = ThemeWindowTextColor();
-    Color colMuted = ThemeWindowTextDisabledColor();
+    Color colMuted = ThemeWindowDarkerTextColor();
+    Color colBg = ThemeWindowControlBackgroundColor();
     gp::El* row = gp::Div(cx->a)
                       ->FlexRow()
                       ->W(gp::kFill)
@@ -889,14 +962,24 @@ static gp::El* AdvFooter(gp::Ctx* cx) {
                       ->Shrink0()
                       ->ItemsCenter()
                       ->PadX(kAdvPadDx)
-                      ->Gap(kAdvGapDx);
+                      ->Gap(kAdvGapDx)
+                      ->TrackFocus(gAdv.footerFocus)
+                      ->TabStop(false);
     AdvHint hints[kAdvMaxHints];
     int nHints = AdvSettingsHints(AdvEditState(), hints);
-    gp::El* hintRow = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Gap(kAdvHintGapDx)->Shrink0();
+    gp::El* hintRow = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Gap(kAdvHintGapDx)->MinW(0)->ClipX();
     for (int i = 0; i < nHints; i++) {
-        gp::El* hint = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Gap(6);
-        hint->Child(DlgKeyCap(cx, hints[i].key));
-        hint->Child(gp::TextEl(cx->a, GpuiDup(cx->a, hints[i].desc))->Font(kAdvMetaFontPx)->Fg(ToGpui(colMuted)));
+        gp::El* hint = gp::Div(cx->a)->FlexRow()->ItemsCenter()->Gap(4)->Shrink0();
+        gp::El* key =
+            gp::Div(cx->a)
+                ->PadX(7)
+                ->PadY(1)
+                ->Radius(3)
+                ->Bg(ToGpui(AccentColor(colBg, 15)))
+                ->Border(1, ToGpui(AccentColor(colBg, 38)))
+                ->Child(gp::TextEl(cx->a, GpuiDup(cx->a, hints[i].key))->Font(kAdvHintFontPx)->Fg(ToGpui(colMuted)));
+        hint->Child(key);
+        hint->Child(gp::TextEl(cx->a, GpuiDup(cx->a, hints[i].desc))->Font(kAdvHintFontPx)->Fg(ToGpui(colMuted)));
         hintRow->Child(hint);
     }
     row->Child(hintRow);
@@ -904,6 +987,7 @@ static gp::El* AdvFooter(gp::Ctx* cx) {
                    ->Label(ToGpui(Tr("Open Settings File")))
                    ->Ghost()
                    ->WithSize(gp::UiSize::Small)
+                   ->TrackFocus(gAdv.openFileFocus)
                    ->OnClick(gp::ListenTo(gAdvView, &AdvancedSettingsView::OnOpenFile))
                    ->IntoEl());
     row->Child(gpc::Button::New(cx, GStrL("adv-help"))
@@ -937,8 +1021,10 @@ static gp::El* AdvFooter(gp::Ctx* cx) {
                    ->WithSize(gp::UiSize::Small)
                    ->OnClick(gp::ListenTo(gAdvView, &AdvancedSettingsView::OnCancel))
                    ->IntoEl());
-    row->Child(
-        DlgFilledButton(cx, GStrL("adv-save"), Tr("Save"), gp::ListenTo(gAdvView, &AdvancedSettingsView::OnSave)));
+    row->Child(DlgFilledButton(cx, GStrL("adv-save"), Tr("Save"), gp::ListenTo(gAdvView, &AdvancedSettingsView::OnSave))
+                   ->TrackFocus(gAdv.saveFocus)
+                   ->TabStop(true)
+                   ->FocusOnPress());
     return row;
 }
 
@@ -947,22 +1033,26 @@ static void AdvBeginBuild(gp::Ctx* cx) {
     if (!gAdvView.IsValid()) {
         gAdvView = gp::EntityNewState<AdvancedSettingsView>(cx->app);
     }
-    if (gAdv.editIsEnum && gAdv.editIdx >= 0 && gAdv.ddValue.PollChanged(cx->app)) {
-        SettingItem* item = gAdv.items[gAdv.editIdx];
-        str::ReplaceWithCopy(&item->strVal, gAdv.ddValue.SelText());
-        SetItemChanged(item);
-        // browsing the list previews each value in turn, as orig does
-        PreviewSettingChange(item);
+    if (gAdv.editIsEnum) {
+        UpdateEnumValue();
+        if (!gAdv.ddValue.comboOpen) {
+            CancelEditValue();
+        }
     }
     gAdv.editFilter->onChange = gp::ListenTo(gAdvView, &AdvancedSettingsView::OnFilter);
     gAdv.editValue->onChange = gp::ListenTo(gAdvView, &AdvancedSettingsView::OnEditInput);
 }
 
 static void AdvEndBuild(gp::Ctx* cx) {
-    if (gAdv.wantEditFocus && gAdv.editIdx >= 0 && !gAdv.editIsEnum) {
+    if (gAdv.wantEditFocus && gAdv.editIdx >= 0) {
         gp::InputFocus(gAdv.editValue, cx->app, cx->win);
-        gp::InputSelectAll(gAdv.editValue, cx->app, cx->win);
+        if (!gAdv.editIsEnum) {
+            gp::InputSelectAll(gAdv.editValue, cx->app, cx->win);
+        }
         gAdv.wantEditFocus = cx->win->input != gAdv.editValue;
+    } else if (gAdv.wantListFocus) {
+        gp::FocusHandleFocus(cx->win, gAdv.listFocus);
+        gAdv.wantListFocus = false;
     } else if (gAdv.wantFocus) {
         gp::InputFocus(gAdv.editFilter, cx->app, cx->win);
         gAdv.wantFocus = cx->win->input != gAdv.editFilter;
@@ -987,12 +1077,13 @@ static gp::El* AdvContentEl(gp::Ctx* cx) {
     AdvBeginBuild(cx);
     gp::WinSize ws = gp::WindowSize(cx->win);
     float dx = std::min(820.f, ws.dipW - 32);
-    gp::El* list = AdvList(cx, kAdvListDy, dx)->H(kAdvListDy)->Shrink0();
+    gp::El* list = AdvList(cx, kAdvListDy, dx)->Shrink0();
     gp::El* body = AdvColumn(cx, list);
     // orig's HandleEnterKey: from an edit, the default button only without a selected row
     DlgSetDefault(cx, gp::ListenTo(gAdvView, &AdvancedSettingsView::OnSave), gAdv.sel < 0 && gAdv.editIdx < 0);
     gp::Listener onClose = gp::ListenTo(gAdvView, &AdvancedSettingsView::OnCancel);
     gp::El* dlg = DlgFrameCard(cx, body, Tr("Advanced Settings"), dx, onClose);
+    dlg->CaptureKeyDown(gp::ListenTo(gAdvView, &AdvancedSettingsView::OnCaptureKey));
     AdvEndBuild(cx);
     return dlg;
 }
@@ -1258,27 +1349,13 @@ static Str AdvToolTitle() {
 }
 
 // the window's content: the column, with the list taking what is left
-// posted: the window may have been closed since (null still repaints tool windows)
-static void AdvInvalidateLater(MainWindow* win) {
-    if (!win || IsMainWindowValid(win)) {
-        AppShellInvalidate(win);
-    }
-}
-
 static gp::El* AdvToolBuild(MainWindow*, gp::Ctx* cx) {
     if (!gAdv.visible || !gAdv.tw) {
         return nullptr;
     }
     AdvBeginBuild(cx);
     gp::WinSize ws = gp::WindowSize(cx->win);
-    float viewDy = AdvListViewDy();
-    float rowDx = gAdv.listBounds.w > 0 ? gAdv.listBounds.w : ws.dipW;
-    float prevDy = gAdv.listBounds.h;
-    gp::El* list = AdvList(cx, viewDy, rowDx)->Flex1()->MinH(kAdvRowDy)->BoundsOut(&gAdv.listBounds);
-    if (prevDy <= 0) {
-        // the list's height is read back from the first frame
-        uitask::Post(MkFunc0(AdvInvalidateLater, gAdv.win), "AdvSettingsListDy");
-    }
+    gp::El* list = AdvList(cx, AdvListViewDy(), ws.dipW);
     gp::El* col =
         AdvColumn(cx, gp::Div(cx->a)->FlexCol()->W(gp::kFill)->Flex1()->MinH(0)->PadY(kAdvListPadDy)->Child(list));
     AdvEndBuild(cx);
@@ -1306,40 +1383,71 @@ static bool AdvRestoreDefault() {
     if (gAdv.editIdx >= 0 && !gAdv.editIsEnum) {
         return false;
     }
-    CancelEditValue();
+    CancelEditValue(true);
     RestoreSettingDefault(item);
     AppShellInvalidate(gAdv.win);
     return true;
 }
 
-static bool AdvToolOnCaptureKey(MainWindow*, gp::Ctx*, const gp::KeyEvent* ev) {
-    if (!gAdv.visible) {
+static bool AdvToolOnCaptureKey(MainWindow*, gp::Ctx* cx, const gp::KeyEvent* ev) {
+    if (!gAdv.visible || ev->imeInProgress) {
         return false;
     }
     if (AdvIsRestoreDefaultKey(ev)) {
-        // the filter keeps the focus; a forward Delete edits its text when there is some
-        bool filterHasText = gAdv.editFilter && len(gp::InputValue(gAdv.editFilter)) > 0;
-        if (ev->vk == VK_DELETE && filterHasText) {
-            return false;
-        }
         return AdvRestoreDefault();
+    }
+    if (ev->vk == VK_ESCAPE && gAdv.editIsEnum) {
+        AdvancedSettingsOnEscape();
+        return true;
+    }
+    if (ev->vk == VK_TAB && gAdv.editIdx >= 0 && !ev->ctrl && !ev->alt) {
+        CommitEditValue();
+        gAdv.wantListFocus = false;
+        // The previous frame still has the editor's focus node. Skip it.
+        if (ev->shift) {
+            gp::InputFocus(gAdv.editFilter, cx->app, cx->win);
+        } else {
+            gp::FocusHandleFocus(cx->win, gAdv.openFileFocus);
+        }
+        return true;
     }
     if (ev->ctrl || ev->alt || ev->shift) {
         return false;
     }
+    if (ev->vk == VK_RETURN) {
+        if (gAdv.editIdx >= 0) {
+            CommitEditValue();
+            return true;
+        }
+        if (cx->win->input == gAdv.editFilter) {
+            if (gAdv.sel < 0) {
+                AdvancedSettingsView::OnSave(nullptr, cx, nullptr);
+            } else {
+                AdvOnEnter();
+            }
+            return true;
+        }
+    }
     if (ev->vk != VK_UP && ev->vk != VK_DOWN) {
         return false;
     }
-    // the open drop-down of an enum has the arrows
-    if (gAdv.editIdx >= 0 && gAdv.editIsEnum) {
+    // A value editor owns its arrows.
+    if (gAdv.editIdx >= 0) {
         return false;
     }
     return AdvMoveSelection(ev->vk == VK_DOWN ? 1 : -1);
 }
 
+void AdvancedSettingsView::OnCaptureKey(AdvancedSettingsView*, gp::Ctx* cx, const gp::KeyEvent* ev) {
+    if (AdvToolOnCaptureKey(gAdv.win, cx, ev)) {
+        const_cast<gp::KeyEvent*>(ev)->propagate = false;
+        gp::Notify(cx);
+    }
+}
+
 // and what the edits leave: Esc (HandleEscapeKey), Enter (HandleEnterKey)
 static bool AdvToolOnKey(MainWindow*, gp::Ctx* cx, const gp::KeyEvent* ev) {
-    if (!gAdv.visible) {
+    if (!gAdv.visible || ev->imeInProgress) {
         return false;
     }
     if (ev->vk == VK_ESCAPE) {
@@ -1351,11 +1459,12 @@ static bool AdvToolOnKey(MainWindow*, gp::Ctx* cx, const gp::KeyEvent* ev) {
         if (cx->win->input && cx->win->input->focused) {
             return true;
         }
+        // GPUI activates the focused footer button on key release.
+        if (gp::FocusHandleContainsFocused(cx->win, gAdv.footerFocus)) {
+            return false;
+        }
         if (gAdv.sel < 0 && gAdv.editIdx < 0) {
-            // orig's HandleEnterKey without a selection: the default button
-            CommitEditValue();
-            ApplyChangesAndSave();
-            CloseAdvancedSettingsDialog();
+            AdvancedSettingsView::OnSave(nullptr, cx, nullptr);
             return true;
         }
         return AdvOnEnter();
@@ -1371,8 +1480,12 @@ static void AdvToolOnOwnerClosed(MainWindow* newOwner) {
 
 // the caption's close box: orig's OnClose cancels
 static void AdvToolOnClosed(MainWindow*) {
-    gAdv.tw = nullptr;
+    MainWindow* reopenFrom = gAdv.reopenFrom;
+    gAdv.reopenFrom = nullptr;
     CloseAdvancedSettingsDialog();
+    if (reopenFrom) {
+        ShowAdvancedSettingsDialog(reopenFrom);
+    }
 }
 
 // orig remembers the client size the window was dragged to (#5804)
@@ -1408,8 +1521,28 @@ static void AdvOpenToolWindow(MainWindow* win) {
     desc.onMoved = AdvToolOnMoved;
 
     gp::WinSize client = win->gpuiWin ? gp::WindowSize(win->gpuiWin) : gp::WinSize{};
-    int dy = gAdvLastClient.dy > 0 ? gAdvLastClient.dy : limitValue((int)client.dipH - 72, 480, 900);
-    int dx = gAdvLastClient.dx > 0 ? gAdvLastClient.dx : limitValue((int)client.dipW - 128, 760, 1100);
+    int dx = limitValue((int)client.dipW - 128, 760, 1100);
+    int dy = limitValue((int)client.dipH - 72, 480, 900);
+#if OS_WIN
+    constexpr int kAdvDefaultVisibleRows = 16;
+    constexpr int kAdvDefaultFooterDx = 598;
+    HWND hwnd = AppShellNativeHwnd(win);
+    if (hwnd) {
+        // The Windows dialog sizes itself in screen pixels, then fits the ideal
+        // size of its list and footer. Convert to the tool window's DIP units.
+        Rect cr = HwndClientRect(hwnd);
+        int dpi = std::max(AppShellWindowDpi(win), 96);
+        dx = std::max(MulDiv(limitValue(cr.dx - 128, 760, 1100), 96, dpi), kAdvDefaultFooterDx);
+        dy = std::max(MulDiv(limitValue(cr.dy - 72, 480, 900), 96, dpi),
+                      (int)(kAdvDefaultVisibleRows * kAdvRowDy + kAdvWinChromeDy));
+    }
+#endif
+    if (gAdvLastClient.dx > 0) {
+        dx = gAdvLastClient.dx;
+    }
+    if (gAdvLastClient.dy > 0) {
+        dy = gAdvLastClient.dy;
+    }
     dx = std::max(dx, kAdvSettingsMinClientDx);
     Size size = ToolWindowOuterSize(desc, win, Size(dx, dy));
     Rect frame = AppShellWindowScreenRect(win);

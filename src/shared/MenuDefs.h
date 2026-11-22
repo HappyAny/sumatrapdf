@@ -25,6 +25,8 @@ extern MenuDef menuDefMainSelection[];
 extern MenuDef menuDefReadAloud[];
 extern MenuDef menuDefContextReadAloud[];
 extern MenuDef menuDefMenubar[];
+extern MenuDef menuDefSelection[];
+extern MenuDef menuDefContext[];
 extern MenuDef menuDefCreateAnnotFromSelection[];
 extern MenuDef menuDefContextAnnotations[];
 extern MenuDef menuDefContextImage[];

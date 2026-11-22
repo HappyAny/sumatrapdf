@@ -20,7 +20,11 @@
 
 #include "gui/UIModels.h"
 #include "ProgressUpdateUI.h"
+#include "Settings.h"
+#include "DisplayMode.h"
+#include "DocController.h"
 #include "EngineBase.h"
+#include "DisplayModel.h"
 #include "TextSelection.h"
 #include "TextSearch.h"
 #include "Commands.h"
@@ -757,6 +761,9 @@ static LRESULT CALLBACK ShellSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
                 int dpi = RoundUp((int)LOWORD(wp), 4);
                 if (dpi < 72) {
                     dpi = 96;
+                }
+                if (DisplayModel* dm = win->AsFixed()) {
+                    dm->SetUiDpi(dpi);
                 }
                 AppShellOnDpiChanged(win, dpi);
                 return DefSubclassProc(hwnd, msg, wp, lp);

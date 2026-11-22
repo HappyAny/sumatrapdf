@@ -92,6 +92,10 @@ static bool IsLive(ToolWindow* tw) {
     return tw && VecContains(gToolWindows, tw);
 }
 
+bool ToolWindowIsSizing(ToolWindow* tw) {
+    return IsLive(tw) && tw->userSizing;
+}
+
 // placing one can run code that opens or closes another
 template <class Fn>
 static void FollowOwned(MainWindow* win, Fn followOne) {
@@ -134,6 +138,10 @@ ToolWindow* ToolWindowModalOf(MainWindow* win) {
         }
     }
     return nullptr;
+}
+
+bool ToolWindowRedactsText(const ToolWindow* tw) {
+    return tw && tw->desc.diagnosticText == ToolWinDiagnosticText::Omit;
 }
 
 ToolWindowDesc ToolWindowModalDesc(const char* name, Str (*title)()) {
@@ -594,7 +602,11 @@ static LRESULT CALLBACK ToolSubclass(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, 
                 RevokeCanvasDropTarget(hwnd);
             }
             break;
+        case WM_ENTERSIZEMOVE:
+            tw->userSizing = true;
+            break;
         case WM_EXITSIZEMOVE:
+            tw->userSizing = false;
             if (tw->desc.onExitSizeMove && IsMainWindowValid(tw->owner)) {
                 tw->desc.onExitSizeMove(tw->owner, HwndWindowRect(hwnd));
             }
@@ -956,7 +968,9 @@ static void FollowOne(ToolWindow* tw) {
         ToolWinNativeShow(tw->gw, false, false);
         return;
     }
-    PlaceFrame(tw, r, TitledFrame(tw->desc));
+    if (r != tw->outer) {
+        PlaceFrame(tw, r, TitledFrame(tw->desc));
+    }
     ToolWinNativeShow(tw->gw, true, false);
 }
 
@@ -1238,33 +1252,36 @@ void ToolRootView::OnKeyDown(ToolRootView* self, gp::Ctx* cx, const gp::KeyEvent
 // button with its label, a field with its value), the click targets and the
 // scrolled boxes of a frame; those are what a test needs to find a row or a
 // button
-static TempStr GpuiLayoutTemp(gp::Window* gw, Str name, Rect r) {
+static TempStr GpuiLayoutTemp(gp::Window* gw, Str name, Rect r,
+                              ToolWinDiagnosticText diagnosticText = ToolWinDiagnosticText::Include) {
     gp::WinSize ws = gp::WindowSize(gw);
     str::Builder out;
     out.Append(fmt("OK name=%s rect=%d,%d,%d,%d client=%d,%d rem=%.2f\n", name, r.x, r.y, r.dx, r.dy, (int)ws.dipW,
                    (int)ws.dipH, gp::WindowRemSize(gw)));
     const gp::PaintCtx& paint = gw->paint;
-    for (const gp::TextHit& t : paint.texts) {
-        const gp::Bounds& b = t.bounds;
-        out.Append(fmt("text rect=%.0f,%.0f,%.0f,%.0f font=%.1f '%s'\n", b.x, b.y, b.w, b.h, t.font,
-                       Str{(char*)t.text.s, (int)t.text.len}));
-    }
-    for (const gp::AccessibilityNode& n : gw->accessibility) {
-        const gp::AccessibilityInfo& info = n.info;
-        if (info.role == gp::AccessibilityRole::None && info.label.len == 0 && info.value.len == 0) {
-            continue;
+    if (diagnosticText == ToolWinDiagnosticText::Include) {
+        for (const gp::TextHit& t : paint.texts) {
+            const gp::Bounds& b = t.bounds;
+            out.Append(fmt("text rect=%.0f,%.0f,%.0f,%.0f font=%.1f '%s'\n", b.x, b.y, b.w, b.h, t.font,
+                           Str{(char*)t.text.s, (int)t.text.len}));
         }
-        const gp::Bounds& b = n.bounds;
-        out.Append(fmt("node rect=%.0f,%.0f,%.0f,%.0f role=%d label='%s' value='%s'", b.x, b.y, b.w, b.h,
-                       (int)info.role, Str{(char*)info.label.s, (int)info.label.len},
-                       Str{(char*)info.value.s, (int)info.value.len}));
-        if (info.disabled) {
-            out.Append(StrL(" disabled=1"));
+        for (const gp::AccessibilityNode& n : gw->accessibility) {
+            const gp::AccessibilityInfo& info = n.info;
+            if (info.role == gp::AccessibilityRole::None && info.label.len == 0 && info.value.len == 0) {
+                continue;
+            }
+            const gp::Bounds& b = n.bounds;
+            out.Append(fmt("node rect=%.0f,%.0f,%.0f,%.0f role=%d label='%s' value='%s'", b.x, b.y, b.w, b.h,
+                           (int)info.role, Str{(char*)info.label.s, (int)info.label.len},
+                           Str{(char*)info.value.s, (int)info.value.len}));
+            if (info.disabled) {
+                out.Append(StrL(" disabled=1"));
+            }
+            if (info.toggled == gp::AccessibilityToggled::True) {
+                out.Append(StrL(" checked=1"));
+            }
+            out.Append(StrL("\n"));
         }
-        if (info.toggled == gp::AccessibilityToggled::True) {
-            out.Append(StrL(" checked=1"));
-        }
-        out.Append(StrL("\n"));
     }
     for (const gp::HitRect& h : paint.hits) {
         bool click = h.onClick.IsValid() || h.listener.IsValid() || h.clickAction != 0;
@@ -1284,7 +1301,7 @@ static TempStr GpuiLayoutTemp(gp::Window* gw, Str name, Rect r) {
 }
 
 static TempStr ToolWindowLayoutTemp(ToolWindow* tw) {
-    return GpuiLayoutTemp(tw->gw, Str(tw->desc.name), ToolWindowRect(tw));
+    return GpuiLayoutTemp(tw->gw, Str(tw->desc.name), ToolWindowRect(tw), tw->desc.diagnosticText);
 }
 
 void ToolRootView::OnTick(ToolRootView* self, gp::Ctx* cx, const gp::TickEvent* ev) {
@@ -1390,7 +1407,7 @@ TempStr ToolWindowTestTemp(Str action, Str name, Str kind, int a, int b, int c, 
         gp::WinSize ws = gp::WindowSize(gw);
         out.Append(
             fmt("OK size=%d,%d focusId=%d edit=%d", (int)ws.dipW, (int)ws.dipH, gp::WindowFocusedId(gw), edit ? 1 : 0));
-        if (edit) {
+        if (edit && !gw->input->masked && !ToolWindowRedactsText(tw)) {
             gp::InputState* in = gw->input;
             gp::Str v = gp::InputValue(in);
             out.Append(fmt(" editText='%s' caret=%d sel=%d,%d", Str{(char*)v.s, (int)v.len}, gp::InputCursor(in),

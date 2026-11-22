@@ -45,13 +45,15 @@ void SidebarSetTocRtl(MainWindow*, bool);
 void SidebarSetFavModel(MainWindow*, FavTreeModel*);
 FavTreeModel* SidebarFavModel(MainWindow*);
 TempStr SidebarFavFilterTextTemp(MainWindow*);
-void SidebarFocusFavorites(MainWindow*);
 void SidebarFocusTop(MainWindow*);
 void SidebarToggleThumbnails(MainWindow*);
 void SidebarToggleBookmarks(MainWindow*);
 void SidebarToggleFavorites(MainWindow*);
 void SidebarToggleLayers(MainWindow*);
 bool SidebarHasLayers(MainWindow*);
+void SidebarShowSignatures(MainWindow*);
+void SidebarResetSignatureRows(MainWindow*);
+void SidebarSelectSignature(MainWindow*, int row);
 bool SidebarOnKeyDown(MainWindow*, int vkey, bool ctrl, bool shift, bool alt);
 // a typed character while a tree has the keyboard: the native tree's type-ahead
 bool SidebarOnChar(MainWindow*, u32 ch);

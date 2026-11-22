@@ -67,23 +67,9 @@ bool PixmapIsEmpty(const Pixmap* px) {
     return !px || px->width <= 0 || px->height <= 0 || !px->data;
 }
 
-#if defined(SUMATRA_NG)
-constexpr bool kThumbnailsFullPageDefault = true;
-#else
-constexpr bool kThumbnailsFullPageDefault = false;
-#endif
-
-// ThumbnailsType: full (the whole first page) or legacy (the top of it);
-// anything else is the app's default
+// The default takes the top of the first page. "full" shows the whole page.
 bool ThumbnailsAreFullPage() {
-    Str type = gSettings ? gSettings->thumbnailsType : Str();
-    if (str::EqI(type, StrL("full"))) {
-        return true;
-    }
-    if (str::EqI(type, StrL("legacy"))) {
-        return false;
-    }
-    return kThumbnailsFullPageDefault;
+    return gSettings && str::EqI(gSettings->thumbnailsType, StrL("full"));
 }
 
 Size ThumbnailFrameSize() {

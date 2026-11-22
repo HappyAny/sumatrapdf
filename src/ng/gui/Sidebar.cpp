@@ -27,6 +27,7 @@
 #include "EngineAll.h"
 #include "DisplayModel.h"
 #include "FileHistory.h"
+#include "SvgIcons.h"
 #include "Commands.h"
 #include "Translations.h"
 #include "Menu.h"
@@ -35,6 +36,7 @@
 #include "AIChatTypes.h"
 #include "WindowTab.h"
 #include "Favorites.h"
+#include "SignatureUI.h"
 #include "TableOfContents.h"
 #include "gui/AppShell.h"
 #include "gui/DocCanvas.h"
@@ -53,10 +55,20 @@ constexpr float kIndentDx = 19;
 constexpr float kChevronDx = 19;
 constexpr float kRowPadL = 4;
 constexpr float kTreeFontSize = 12;
-constexpr float kPaneHeaderDy = 24;
-// gpui XSmall icon button at 96 DPI (1.25rem) and Small input font
-constexpr int kSidebarIconPx = 20;
+constexpr int kSidebarIconPx = 16;
+constexpr int kSidebarIconPad = 3;
+constexpr int kSidebarClosePx = 16;
+constexpr int kSidebarClosePadL = 8;
+constexpr int kSidebarClosePadR = 2;
 constexpr int kSidebarFilterFontPx = 14;
+constexpr int kLayerRowDy = 24;
+constexpr int kLayerPadDx = 8;
+constexpr int kLayerIndentDx = 16;
+constexpr int kLayerBoxDx = 13;
+constexpr int kMinUiFontPx = 9;
+constexpr int kSigRowDy = 46;
+constexpr int kSigRowIconDx = 18;
+constexpr int kSigRowPadDx = 8;
 constexpr int kThumbDx = 120;
 constexpr int kThumbDy = 170;
 constexpr int kThumbGap = 16;
@@ -115,8 +127,7 @@ struct SidebarUI {
     int thumbRevealPage = 0;
     int thumbSelectedPage = 0;
     bool thumbSelectionPinned = false;
-    // view icons, Bookmarks / Thumbnails / Favorites / Layers, for each panel
-    gpui::Bounds viewIconBounds[3][4]{};
+    gpui::Bounds viewIconBounds[3][5]{};
     // pixel sizes at the current frame DPI (96 DPI keeps the constants above)
     int viewIconPx = kSidebarIconPx;
     int filterFontPx = kSidebarFilterFontPx;
@@ -138,7 +149,6 @@ struct SidebarUI {
     MenuModel* favMenu = nullptr;
     FavTreeItem* favMenuFor = nullptr;
     bool favMenuValid = false;
-    bool favWantFocus = false;
     gp::Entity<gp::PopupMenuState> tocPopup;
     gp::Entity<gp::PopupMenuState> favPopup;
     // a right press landed on a row; the pane's own handler for the same press
@@ -157,6 +167,11 @@ struct SidebarUI {
     bool layersStale = true;
     int layerSel = -1;
     float layersScrollY = 0;
+    gp::Bounds layersView{};
+    WindowTab* signatureTab = nullptr;
+    int signatureSel = -1;
+    float signatureScrollY = 0;
+    gp::Bounds signatureView{};
 };
 
 struct SidebarView {
@@ -187,9 +202,12 @@ struct SidebarView {
     static void OnThumbScroll(SidebarView* self, gp::Ctx* cx, const gp::ScrollEvent* ev);
     static void OnThumbClose(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*);
     static void OnPanelView(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*, int64_t arg);
-    static void OnLayerClick(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*, int64_t row);
+    static void OnLayerDown(SidebarView* self, gp::Ctx* cx, const gp::MouseDownEvent*, int64_t row);
     static void OnLayersScroll(SidebarView* self, gp::Ctx* cx, const gp::ScrollEvent* ev);
     static void OnLayersClose(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*);
+    static void OnSignatureDown(SidebarView*, gp::Ctx*, const gp::MouseDownEvent*, int64_t row);
+    static void OnSignaturesScroll(SidebarView*, gp::Ctx*, const gp::ScrollEvent*);
+    static void OnSignaturesClose(SidebarView*, gp::Ctx*, const gp::ClickEvent*);
 };
 
 // one action per pane, carrying the context-menu command id
@@ -209,13 +227,20 @@ static SidebarUI* Ui(MainWindow* win);
 static gp::App* WinApp(MainWindow* win);
 static gp::InputState* EnsureInput(MainWindow* win, gpui::InputState** slot, Str placeholder);
 
+static void EnsurePanelFocus(SidebarUI* ui, gp::App* app) {
+    if (ui->tocFocus.IsValid()) {
+        return;
+    }
+    ui->tocFocus = gp::FocusHandleNew(app);
+    ui->midFocus = gp::FocusHandleNew(app);
+    ui->favFocus = gp::FocusHandleNew(app);
+}
+
 static void EnsureView(MainWindow* win, gp::Ctx* cx) {
     SidebarUI* ui = Ui(win);
+    EnsurePanelFocus(ui, cx->app);
     if (!ui->view.IsValid()) {
         ui->view = gp::EntityNewState<SidebarView>(cx->app);
-        ui->tocFocus = gp::FocusHandleNew(cx);
-        ui->midFocus = gp::FocusHandleNew(cx);
-        ui->favFocus = gp::FocusHandleNew(cx);
     }
     auto* view = (SidebarView*)gp::EntityGet(cx->app, ui->view.id);
     view->win = win;
@@ -233,7 +258,7 @@ void SidebarApplyDpi(MainWindow* win) {
         return;
     }
     SidebarUI* ui = Ui(win);
-    ui->viewIconPx = AppShellDpiPx(win, kSidebarIconPx);
+    ui->viewIconPx = RoundUp(AppShellDpiPx(win, kSidebarIconPx), 4);
     ui->filterFontPx = AppShellDpiPx(win, kSidebarFilterFontPx);
     if (WinApp(win)) {
         EnsureInput(win, &ui->tocFilter, Tr("Search Bookmarks"));
@@ -390,11 +415,6 @@ TempStr SidebarFavFilterTextTemp(MainWindow* win) {
     return str::DupTemp(FromGpui(gp::InputValue(ui->favFilter)));
 }
 
-void SidebarFocusFavorites(MainWindow* win) {
-    Ui(win)->favWantFocus = true;
-    AppShellInvalidate(win);
-}
-
 static gp::FocusHandle SlotFocus(SidebarUI* ui, SidebarSlot slot) {
     switch (slot) {
         case SidebarSlot::Top:
@@ -464,18 +484,19 @@ static bool FocusedSlot(MainWindow* win, SidebarSlot* slotOut) {
 // orig's FocusSidebarPanel: the keyboard goes to the panel's tree (or to the
 // panel itself for thumbnails), not to its search field
 void SidebarFocusPanel(MainWindow* win, SidebarSlot slot) {
-    if (!SidebarPanelVisible(win, slot) || !win->gpuiWin) {
+    if (!win || !win->gpuiWin) {
         return;
     }
-    gp::FocusHandle focus = SlotFocus(win->sidebar, slot);
-    if (!focus.IsValid()) {
+    SidebarUI* ui = Ui(win);
+    if (!SidebarPanelVisible(win, slot)) {
         return;
     }
     gp::Window* gw = win->gpuiWin;
+    EnsurePanelFocus(ui, gw->app);
     if (gw->input) {
         gp::InputBlur(gw->input, gw->app, gw);
     }
-    gp::FocusHandleFocus(gw, focus);
+    gp::FocusHandleFocus(gw, SlotFocus(ui, slot));
     AppShellInvalidate(win);
 }
 
@@ -499,6 +520,9 @@ SidebarContent SidebarContentFromStr(Str s, SidebarContent fallback) {
     if (str::EqI(s, StrL("favorites"))) {
         return SidebarContent::Favorites;
     }
+    if (str::EqI(s, StrL("signatures"))) {
+        return SidebarContent::Signatures;
+    }
     if (str::EqI(s, StrL("layers"))) {
         return SidebarContent::Layers;
     }
@@ -511,6 +535,9 @@ Str SidebarContentToStr(SidebarContent content) {
     }
     if (content == SidebarContent::Favorites) {
         return StrL("favorites");
+    }
+    if (content == SidebarContent::Signatures) {
+        return StrL("signatures");
     }
     if (content == SidebarContent::Layers) {
         return StrL("layers");
@@ -528,14 +555,17 @@ bool SidebarHasLayers(MainWindow* win) {
 }
 
 static bool ContentAvailable(MainWindow* win, SidebarContent content) {
+    if (content == SidebarContent::Signatures) {
+        return win && TabHasSignatures(win->CurrentTab());
+    }
     if (content == SidebarContent::Layers) {
         return SidebarHasLayers(win);
     }
     if (content == SidebarContent::Thumbnails) {
-        return win && win->AsFixed();
+        return win && win->IsDocLoaded() && win->AsFixed();
     }
     if (content == SidebarContent::Favorites) {
-        return CanAccessDisk();
+        return !gPluginMode && CanAccessDisk();
     }
     return win && win->IsDocLoaded() && win->ctrl && win->ctrl->HasToc();
 }
@@ -632,14 +662,21 @@ static void HidePanel(MainWindow* win, SidebarSlot slot) {
         }
         gSettings->showSidebarMiddle = false;
         SetSidebarVisibility(win, ui.tocVisible, ui.favVisible, SidebarResizeFrame::Adjust);
-        if (focused && slot != SidebarSlot::Middle) {
-            SidebarFocusPanel(win, slot);
+        if (focused) {
+            if (slot != SidebarSlot::Middle && SidebarPanelVisible(win, slot)) {
+                SidebarFocusPanel(win, slot);
+            } else {
+                AppShellFocusFrame(win);
+            }
         }
         return;
     }
     bool top = slot != SidebarSlot::Top && ui.tocVisible;
     bool bottom = slot != SidebarSlot::Bottom && ui.favVisible;
     SetSidebarVisibility(win, top, bottom, SidebarResizeFrame::Adjust);
+    if (!SidebarPanelVisible(win, slot) && SidebarPanelHasFocus(win, slot)) {
+        AppShellFocusFrame(win);
+    }
 }
 
 // orig's ShowSidebarView: the first free panel, top, bottom, then middle; with
@@ -670,13 +707,7 @@ static void ToggleContent(MainWindow* win, SidebarContent content) {
     bool top = slot == SidebarSlot::Top || ui.tocVisible;
     bool bottom = slot == SidebarSlot::Bottom || ui.favVisible;
     SetSidebarVisibility(win, top, bottom, SidebarResizeFrame::Adjust);
-    if (content == SidebarContent::Favorites) {
-        SidebarFocusFavorites(win);
-    } else if (content == SidebarContent::Thumbnails || gSettings->sidebarAutoHide) {
-        // showing the pane puts the keyboard there, same as the favorites tree.
-        // A floating sidebar shows while it has the keyboard (SidebarAutoHide)
-        SidebarFocusPanel(win, slot);
-    }
+    SidebarFocusPanel(win, slot);
     ScheduleSaveSettings();
 }
 
@@ -709,8 +740,31 @@ void SidebarToggleLayers(MainWindow* win) {
     ScheduleSaveSettings();
 }
 
-static float ScrollToRow(float scrollY, float viewH, int idx, int nRows);
+void SidebarShowSignatures(MainWindow* win) {
+    if (!ContentAvailable(win, SidebarContent::Signatures)) {
+        return;
+    }
+    SidebarSlot current;
+    if (ShownSlot(win, SidebarContent::Signatures, &current)) {
+        SidebarFocusPanel(win, current);
+        return;
+    }
+    SetPanelContent(win, SidebarSlot::Top, SidebarContent::Signatures);
+    SetTocVisibility(win, true, SidebarResizeFrame::Adjust);
+    SidebarFocusPanel(win, SidebarSlot::Top);
+    ScheduleSaveSettings();
+}
+
+void SidebarResetSignatureRows(MainWindow* win) {
+    SidebarUI* ui = Ui(win);
+    ui->signatureTab = win->CurrentTab();
+    ui->signatureSel = -1;
+    ui->signatureScrollY = 0;
+}
+
+static float ScrollToRow(float scrollY, float viewH, int idx, int nRows, float rowDy = kRowDy);
 static bool LayersOnKeyDown(MainWindow* win, SidebarUI* ui, int vkey);
+static bool SignaturesOnKeyDown(MainWindow* win, SidebarUI* ui, int vkey);
 static TempStr LayersTestTemp(MainWindow* win, Str op, int arg);
 static int TopPaneDy(MainWindow* win);
 
@@ -866,6 +920,9 @@ bool SidebarOnKeyDown(MainWindow* win, int vkey, bool ctrl, bool shift, bool alt
     if (content == SidebarContent::Layers) {
         return LayersOnKeyDown(win, ui, vkey);
     }
+    if (content == SidebarContent::Signatures) {
+        return SignaturesOnKeyDown(win, ui, vkey);
+    }
     if (content == SidebarContent::Bookmarks) {
         int n = len(ui->tocRows);
         if (n == 0) {
@@ -1006,7 +1063,7 @@ bool SidebarOnKeyDown(MainWindow* win, int vkey, bool ctrl, bool shift, bool alt
     if (!dm) {
         return false;
     }
-    int cols = (win->sidebarDx - kThumbGap) / (kThumbDx + kThumbGap);
+    int cols = ((int)AppShellSidebarWidthDip(win) - kThumbGap) / (kThumbDx + kThumbGap);
     cols = limitValue(cols, 1, kThumbMaxCols);
     int delta = vkey == VK_UP ? -cols : cols;
     int pageNo = limitValue(ui->thumbSelectedPage + delta, 1, dm->PageCount());
@@ -1746,8 +1803,9 @@ void SidebarView::OnFavSplitter(SidebarView* self, gp::Ctx* cx, const gp::DragMo
     if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
-    int contentDy = win->canvasRc.dy;
-    int tocDy = (int)ev->event.y - win->canvasRc.y;
+    float scale = CanvasScale(win);
+    int contentDy = (int)std::round((float)win->canvasRc.dy / scale);
+    int tocDy = (int)std::round((ev->event.y - (float)win->canvasRc.y) / scale);
     tocDy = limitValue(tocDy, kTocMinDy, std::max(kTocMinDy, contentDy - kTocMinDy));
     if (tocDy == gSettings->tocDy) {
         return;
@@ -1763,10 +1821,12 @@ void SidebarView::OnMiddleSplitter(SidebarView* self, gp::Ctx* cx, const gp::Dra
     if (!IsMainWindowValidAndNotClosing(win)) {
         return;
     }
-    int contentDy = win->canvasRc.dy;
+    float scale = CanvasScale(win);
+    int contentDy = (int)std::round((float)win->canvasRc.dy / scale);
     int tocDy = TopPaneDy(win);
     int restDy = contentDy - tocDy - kSplitterDy;
-    int middleDy = (int)ev->event.y - win->canvasRc.y - tocDy - kSplitterDy;
+    int mouseY = (int)std::round((ev->event.y - (float)win->canvasRc.y) / scale);
+    int middleDy = mouseY - tocDy - kSplitterDy;
     middleDy = limitValue(middleDy, kTocMinDy, std::max(kTocMinDy, restDy - kTocMinDy));
     if (middleDy == gSettings->sidebarMiddleDy) {
         return;
@@ -1805,16 +1865,21 @@ void SidebarView::OnThumbClose(SidebarView* self, gp::Ctx* cx, const gp::ClickEv
 }
 
 void SidebarView::OnPanelView(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*, int64_t arg) {
-    SidebarSlot slot = (SidebarSlot)(arg >> 2);
-    SidebarContent content = (SidebarContent)(arg & 3);
-    if (!ContentAvailable(self->win, content)) {
+    constexpr int kViewCount = (int)SidebarContent::Layers + 1;
+    SidebarSlot slot = (SidebarSlot)(arg / kViewCount);
+    SidebarContent content = (SidebarContent)(arg % kViewCount);
+    MainWindow* win = self->win;
+    if (content == SlotContent(win, slot) || !ContentAvailable(win, content)) {
         return;
     }
-    SetPanelContent(self->win, slot, content);
-    if (content == SidebarContent::Bookmarks) {
-        LoadTocTree(self->win);
-    } else if (content == SidebarContent::Favorites) {
-        PopulateFavTreeIfNeeded(self->win);
+    SetPanelContent(win, slot, content);
+    WindowTab* tab = win->CurrentTab();
+    bool showTop = tab && (win->InPresentation() ? tab->showTocPresentation : tab->showToc);
+    SetTocVisibility(win, showTop);
+    if (SidebarPanelVisible(win, slot)) {
+        SidebarFocusPanel(win, slot);
+    } else if (SidebarPanelHasFocus(win, slot)) {
+        AppShellFocusFrame(win);
     }
     ScheduleSaveSettings();
     gp::Notify(cx);
@@ -1836,73 +1901,107 @@ static gpc::PopupMenu* PopupFromModel(gp::Ctx* cx, MenuModel* model, Str id, uin
     return menu;
 }
 
-static gp::El* PaneHeader(MainWindow* win, gp::Ctx* cx, bool selectors, SidebarSlot slot, Str title, Str closeId,
+static void PaintPaneClose(gp::PaintCtx* ctx, gp::El* el, void* user) {
+    MainWindow* win = (MainWindow*)user;
+    int dx = AppShellDpiPx(win, kSidebarClosePx);
+    float scale = CanvasScale(win);
+    float size = (float)dx * scale;
+    gp::Bounds b = el->Bounds();
+    float x = b.x + (float)AppShellDpiPx(win, kSidebarClosePadL) * scale;
+    float y = b.y;
+    bool hovered = el->clickId != 0 && ctx->hoverId == el->clickId;
+    gp::Rgba fg = ToGpui(hovered ? MkRgb(0xf9, 0xeb, 0xeb) : MkGray(0xa0));
+    if (hovered) {
+        gp::CanvasFillRound(ctx, x, y, size, size, size / 2, ToGpui(MkRgb(0xc1, 0x35, 0x35)));
+    }
+    float pad = (float)(dx / 3) * scale;
+    float right = x + size - pad;
+    float bottom = y + size - pad;
+    gp::CanvasLine(ctx, x + pad, y + pad, right, bottom, 2.f * scale, fg);
+    gp::CanvasLine(ctx, right, y + pad, x + pad, bottom, 2.f * scale, fg);
+}
+
+static gp::El* PaneHeader(MainWindow* win, gp::Ctx* cx, bool selectors, SidebarSlot slot, Str closeId,
                           gp::Listener onClose) {
-    const gp::Theme& th = gp::ThemeNow(cx->app);
     SidebarApplyDpi(win);
     int iconPx = Ui(win)->viewIconPx;
-    gp::El* row = gp::Div(cx->a)
-                      ->FlexRow()
-                      ->W(gp::kFill)
-                      ->H(std::max(kPaneHeaderDy, (float)iconPx))
-                      ->Shrink0()
-                      ->ItemsCenter()
-                      ->PadX(6)
-                      ->Gap(4);
+    int iconButtonDx = iconPx + 2 * AppShellDpiPx(win, kSidebarIconPad);
+    int closeDx = AppShellDpiPx(win, kSidebarClosePx);
+    int closeWidth = closeDx + AppShellDpiPx(win, kSidebarClosePadL) + AppShellDpiPx(win, kSidebarClosePadR);
+    int headerDy = selectors ? std::max(iconButtonDx, closeDx) : closeDx;
+    float scale = CanvasScale(win);
+    Color bg = ThemeControlBackgroundColor();
+    gp::El* row =
+        gp::Div(cx->a)->FlexRow()->W(gp::kFill)->H((float)headerDy * scale)->Shrink0()->ItemsCenter()->Bg(ToGpui(bg));
     if (selectors) {
         SidebarContent selected = SlotContent(win, slot);
         int slotIdx = (int)slot;
         SidebarContent contents[] = {SidebarContent::Bookmarks, SidebarContent::Thumbnails, SidebarContent::Favorites,
-                                     SidebarContent::Layers};
-        gp::IconName icons[] = {gp::IconName::BookOpen, gp::IconName::GalleryVerticalEnd, gp::IconName::Star,
-                                gp::IconName::Eye};
-        Str tips[] = {Tr("Bookmarks"), Tr("Thumbnails"), Tr("Favorites"), Tr("Layers")};
+                                     SidebarContent::Signatures, SidebarContent::Layers};
+        const char* icons[] = {gIconSidebarBookmarks, gIconHomeThumbnails, gIconSidebarFavorites,
+                               gIconSidebarSignatures, gIconSidebarLayers};
+        Str tips[] = {Tr("Bookmarks"), Tr("Thumbnails"), Tr("Favorites"), Tr("Signatures"), Tr("Layers")};
         for (int i = 0; i < dimofi(contents); i++) {
-            // Layers is about the document: only in its panel, only when it has them
-            bool docOnly = contents[i] == SidebarContent::Layers;
+            bool docOnly = contents[i] == SidebarContent::Layers || contents[i] == SidebarContent::Signatures;
             if (docOnly && (slot != SidebarSlot::Top || !ContentAvailable(win, contents[i]))) {
                 continue;
             }
-            int64_t arg = (slotIdx << 2) | (int)contents[i];
+            int64_t arg = slotIdx * dimofi(contents) + (int)contents[i];
+            bool enabled = ContentAvailable(win, contents[i]);
+            Color fg = enabled ? ThemeWindowTextColor() : ThemeWindowTextDisabledColor();
+            gp::El* icon = gpc::Icon::Empty(cx)
+                               ->Data(ToGpui(Str(icons[i])))
+                               ->Size((float)iconPx * scale)
+                               ->Color(ToGpui(fg))
+                               ->IntoEl();
             auto* button = gpc::Button::New(cx, GpuiDup(cx->a, fmt("sidebar-view-%d-%d", slotIdx, i)))
-                               ->Icon(icons[i])
+                               ->Child(icon)
                                ->Ghost()
                                ->Compact()
-                               ->WithSize(gp::UiSize::XSmall)
-                               ->Size((float)iconPx)
-                               ->Selected(selected == contents[i])
-                               ->Disabled(!ContentAvailable(win, contents[i]))
+                               ->Rounded(0.f)
+                               ->Size((float)iconButtonDx * scale)
+                               ->TabStop(false)
+                               ->Disabled(!enabled)
                                ->Tooltip(ToGpui(tips[i]))
                                ->OnClick(gp::ListenTo(Ui(win)->view, &SidebarView::OnPanelView, arg));
-            row->Child(button->IntoEl()->BoundsOut(&Ui(win)->viewIconBounds[slotIdx][i]));
+            gp::El* el = button->IntoEl()->Shrink0();
+            if (enabled) {
+                gp::Rgba hoverBg = ToGpui(AccentColor(bg, 20));
+                el->HoverBg(hoverBg)->ActiveBg(hoverBg);
+                if (selected == contents[i]) {
+                    el->Bg(ToGpui(AccentColor(bg, 36)));
+                }
+            }
+            row->Child(el->BoundsOut(&Ui(win)->viewIconBounds[slotIdx][i]));
         }
-        row->Child(gp::Div(cx->a)->Flex1());
-    } else {
-        row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, title))->Font(12)->Bold()->Fg(th.mutedFg)->Flex1()->Truncate());
     }
-    row->Child(gpc::Button::New(cx, GpuiDup(cx->a, closeId))
-                   ->Icon(gp::IconName::Close)
-                   ->Ghost()
-                   ->Compact()
-                   ->WithSize(gp::UiSize::XSmall)
-                   ->Size((float)iconPx)
-                   ->Tooltip(ToGpui(Tr("Close")))
-                   ->OnClick(onClose)
-                   ->IntoEl());
+    row->Child(gp::Div(cx->a)->Flex1());
+    gp::El* close = gp::Div(cx->a)
+                        ->W((float)closeWidth * scale)
+                        ->H((float)closeDx * scale)
+                        ->Shrink0()
+                        ->Cursor(gp::CursorKind::Pointer)
+                        ->Role(gp::AccessibilityRole::Button)
+                        ->AriaLabel(ToGpui(Tr("Close")))
+                        ->PathClick(GpuiDup(cx->a, closeId))
+                        ->OnClick(onClose);
+    close->customPaint = &PaintPaneClose;
+    close->customUser = win;
+    row->Child(close);
     return row;
 }
 
 // scroll `scrollY` so that row `idx` is inside the viewport
-static float ScrollToRow(float scrollY, float viewH, int idx, int nRows) {
+static float ScrollToRow(float scrollY, float viewH, int idx, int nRows, float rowDy) {
     if (idx < 0 || viewH <= 0) {
         return scrollY;
     }
-    float top = (float)idx * kRowDy;
-    float maxScroll = std::max(0.f, (float)nRows * kRowDy - viewH);
+    float top = (float)idx * rowDy;
+    float maxScroll = std::max(0.f, (float)nRows * rowDy - viewH);
     if (top < scrollY) {
         scrollY = top;
-    } else if (top + kRowDy > scrollY + viewH) {
-        scrollY = top + kRowDy - viewH;
+    } else if (top + rowDy > scrollY + viewH) {
+        scrollY = top + rowDy - viewH;
     }
     return std::max(0.f, std::min(scrollY, maxScroll));
 }
@@ -2145,8 +2244,8 @@ static gp::El* BuildThumbPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
     DisplayModel* dm = win->AsFixed();
     const gp::Theme& th = gp::ThemeNow(cx->app);
     gp::El* pane = gp::Div(cx->a)->FlexCol()->SizeFull()->Bg(th.tokens.sidebar);
-    pane->Child(PaneHeader(win, cx, true, slot, Tr("Thumbnails"), StrL("thumb-close"),
-                           gp::ListenTo(ui->view, &SidebarView::OnThumbClose)));
+    pane->Child(
+        PaneHeader(win, cx, true, slot, StrL("thumb-close"), gp::ListenTo(ui->view, &SidebarView::OnThumbClose)));
     if (!dm) {
         return pane;
     }
@@ -2157,7 +2256,7 @@ static gp::El* BuildThumbPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
         ui->thumbBounds[i] = {};
     }
     int currentPage = dm->CurrentPageNo();
-    int cols = (win->sidebarDx - kThumbGap) / (kThumbDx + kThumbGap);
+    int cols = ((int)AppShellSidebarWidthDip(win) - kThumbGap) / (kThumbDx + kThumbGap);
     cols = limitValue(cols, 1, kThumbMaxCols);
     int rows = (pageCount + cols - 1) / cols;
     float rowDy = (float)(kThumbDy + kThumbGap);
@@ -2381,8 +2480,8 @@ static gp::El* BuildTocPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
     // ng: the pane is inset on the right so nothing it draws sits under the
     // splitter's grab strip (orig's SplitterCtrl is a window of its own)
     gp::El* pane = gp::Div(cx->a)->FlexCol()->SizeFull()->Bg(th.tokens.sidebar);
-    pane->Child(PaneHeader(win, cx, true, slot, Tr("Bookmarks"), StrL("toc-close"),
-                           gp::ListenTo(Ui(win)->view, &SidebarView::OnTocClose)));
+    pane->Child(
+        PaneHeader(win, cx, true, slot, StrL("toc-close"), gp::ListenTo(Ui(win)->view, &SidebarView::OnTocClose)));
 
     gp::InputState* filter = EnsureInput(win, &ui->tocFilter, Tr("Search Bookmarks"));
     filter->onChange = gp::ListenTo(Ui(win)->view, &SidebarView::OnTocFilter);
@@ -2550,8 +2649,8 @@ static gp::El* BuildFavPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot, bool
     // ng: the pane is inset on the right so nothing it draws sits under the
     // splitter's grab strip (orig's SplitterCtrl is a window of its own)
     gp::El* pane = gp::Div(cx->a)->FlexCol()->SizeFull()->Bg(th.tokens.sidebar);
-    pane->Child(PaneHeader(win, cx, selectors, slot, Tr("Favorites"), StrL("fav-close"),
-                           gp::ListenTo(Ui(win)->view, &SidebarView::OnFavClose)));
+    pane->Child(
+        PaneHeader(win, cx, selectors, slot, StrL("fav-close"), gp::ListenTo(Ui(win)->view, &SidebarView::OnFavClose)));
 
     gp::InputState* filter = EnsureInput(win, &ui->favFilter, Tr("Search Favorites"));
     filter->onChange = gp::ListenTo(Ui(win)->view, &SidebarView::OnFavFilter);
@@ -2652,10 +2751,6 @@ static gp::El* BuildFavPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot, bool
     body->OnAction(ActFavMenu(), gp::ListenTo(Ui(win)->view, &SidebarView::OnFavAction));
     pane->Child(body);
 
-    if (ui->favWantFocus) {
-        ui->favWantFocus = false;
-        gp::InputFocus(filter, cx->app, cx->win);
-    }
     return pane;
 }
 
@@ -2689,10 +2784,35 @@ static void ToggleLayer(MainWindow* win, int row) {
     AppShellInvalidate(win);
 }
 
-void SidebarView::OnLayerClick(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*, int64_t row) {
-    SidebarUI* ui = Ui(self->win);
-    ui->layerSel = (int)row;
-    ToggleLayer(self->win, (int)row);
+static float LayerRowDy(MainWindow* win) {
+    return (float)std::max(1, AppShellDpiPx(win, kLayerRowDy)) * CanvasScale(win);
+}
+
+static float LayerUsableDy(SidebarUI* ui, float rowDy) {
+    int rows = (int)(ui->layersView.h / rowDy);
+    return rows > 0 ? (float)(rows * rowDy) : ui->layersView.h;
+}
+
+static float ListFontDip(MainWindow* win) {
+    int font = gSettings->uIFontSize;
+    if (font < kMinUiFontPx) {
+        font = AppShellDpiPx(win, (int)kTreeFontSize);
+    }
+    return (float)font * CanvasScale(win);
+}
+
+static void SelectLayerRow(MainWindow* win, SidebarUI* ui, int row) {
+    float rowDy = LayerRowDy(win);
+    ui->layerSel = row;
+    ui->layersScrollY = ScrollToRow(ui->layersScrollY, LayerUsableDy(ui, rowDy), row, len(ui->layerRows), rowDy);
+}
+
+void SidebarView::OnLayerDown(SidebarView* self, gp::Ctx* cx, const gp::MouseDownEvent* ev, int64_t row) {
+    MainWindow* win = self->win;
+    SelectLayerRow(win, Ui(win), (int)row);
+    if (ev->button == gp::MouseButton::Left && ev->clickCount % 2 != 0) {
+        ToggleLayer(win, (int)row);
+    }
     gp::Notify(cx);
 }
 
@@ -2706,60 +2826,98 @@ void SidebarView::OnLayersClose(SidebarView* self, gp::Ctx* cx, const gp::ClickE
     gp::Notify(cx);
 }
 
-//  [indent][checkbox / radio] text      a label has no box; a locked layer is disabled
+struct LayerBox {
+    gp::Rgba fg;
+    gp::Rgba bg;
+    PdfLayerKind kind;
+    bool checked;
+    int dx;
+    float scale;
+};
+
+static void PaintLayerBox(gp::PaintCtx* ctx, gp::El* el, void* user) {
+    auto* box = (LayerBox*)user;
+    gp::Bounds b = el->Bounds();
+    int dx = box->dx;
+    float scale = box->scale;
+    if (box->kind == PdfLayerKind::Radio) {
+        gp::CanvasFillRound(ctx, b.x, b.y, b.w, b.h, b.w / 2, box->fg);
+        float inside = b.w - 2 * scale;
+        gp::CanvasFillRound(ctx, b.x + scale, b.y + scale, inside, inside, inside / 2, box->bg);
+        if (box->checked) {
+            float inset = (float)(dx / 4) * scale;
+            float dot = b.w - 2 * inset;
+            gp::CanvasFillRound(ctx, b.x + inset, b.y + inset, dot, dot, dot / 2, box->fg);
+        }
+        return;
+    }
+    gp::CanvasStrokeRound(ctx, b.x, b.y, b.w, b.h, 0, scale, box->fg);
+    if (box->checked) {
+        float x1 = b.x + (float)(dx / 5) * scale;
+        float x2 = b.x + (float)(2 * dx / 5) * scale;
+        float x3 = b.x + (float)(4 * dx / 5) * scale;
+        float y1 = b.y + (float)(dx / 2) * scale;
+        float y2 = b.y + (float)(3 * dx / 4) * scale;
+        float y3 = b.y + (float)(dx / 4) * scale;
+        float stroke = (float)std::max(2, dx / 6) * scale;
+        gp::CanvasLine(ctx, x1, y1, x2, y2, stroke, box->fg);
+        gp::CanvasLine(ctx, x2, y2, x3, y3, stroke, box->fg);
+    }
+}
+
 static gp::El* BuildLayersPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
     SidebarUI* ui = Ui(win);
-    const gp::Theme& th = gp::ThemeNow(cx->app);
     ReloadLayerRows(win, ui);
+    Color bg = ThemeControlBackgroundColor();
+    Color selBg = AccentColor(ThemeWindowBackgroundColor(), 25);
+    Color fg = ThemeWindowTextColor();
+    float scale = CanvasScale(win);
+    float pad = (float)AppShellDpiPx(win, kLayerPadDx) * scale;
+    float indent = (float)AppShellDpiPx(win, kLayerIndentDx) * scale;
+    int boxPx = AppShellDpiPx(win, kLayerBoxDx);
+    float boxDx = (float)boxPx * scale;
+    float rowDy = LayerRowDy(win);
+    float font = ListFontDip(win);
 
-    gp::El* pane = gp::Div(cx->a)->FlexCol()->SizeFull()->Bg(th.tokens.sidebar);
-    pane->Child(PaneHeader(win, cx, true, slot, Tr("Layers"), StrL("layers-close"),
-                           gp::ListenTo(ui->view, &SidebarView::OnLayersClose)));
+    gp::El* pane = gp::Div(cx->a)->FlexCol()->SizeFull()->Bg(ToGpui(bg));
+    pane->Child(
+        PaneHeader(win, cx, true, slot, StrL("layers-close"), gp::ListenTo(ui->view, &SidebarView::OnLayersClose)));
 
     gp::FocusHandle focus = SlotFocus(ui, slot);
-    bool hasFocus = focus.IsValid() && gp::FocusHandleIsFocused(cx->win, focus);
-    gp::Listener click = gp::ListenTo(ui->view, &SidebarView::OnLayerClick, 0);
-    gp::El* list = gp::Div(cx->a)->FlexCol()->W(gp::kFill)->PadY(2);
+    gp::Listener down = gp::ListenTo(ui->view, &SidebarView::OnLayerDown, 0);
+    gp::El* list = gp::Div(cx->a)->FlexCol()->W(gp::kFill);
     for (int i = 0; i < len(ui->layerRows); i++) {
         const PdfLayerRow* layer = ui->layerRows[i];
-        Color bgCol, txtCol;
-        TreeRowColors(i == ui->layerSel, hasFocus, &bgCol, &txtCol);
+        bool selected = i == ui->layerSel;
+        gp::Rgba rowBg = ToGpui(selected ? selBg : bg);
+        gp::Rgba rowFg = ToGpui(layer->locked ? AccentColor(fg, 60) : fg);
         gp::El* row = gp::Div(cx->a)
                           ->FlexRow()
                           ->W(gp::kFill)
-                          ->H(kRowDy + 4)
+                          ->H(rowDy)
+                          ->Shrink0()
                           ->ItemsCenter()
-                          ->PadR(6)
-                          ->PadL(kRowPadL + (float)layer->depth * kIndentDx)
-                          ->Bg(ToGpui(bgCol));
-        Str id = fmt("layer-%d", i);
-        Str text = layer->text;
-        if (layer->kind == PdfLayerKind::Label) {
-            row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, text))
-                           ->Font(kTreeFontSize)
-                           ->Fg(ToGpui(txtCol))
-                           ->Flex1()
-                           ->MinW(0)
-                           ->Truncate());
-        } else if (layer->kind == PdfLayerKind::Radio) {
-            row->Child(gpc::Radio::New(cx, GpuiDup(cx->a, id))
-                           ->Label(GpuiDup(cx->a, text))
-                           ->Checked(layer->on)
-                           ->Disabled(layer->locked)
-                           ->WithSize(gp::UiSize::Small)
-                           ->TabStop(false)
-                           ->OnClick(gp::ListenerArg(click, i))
-                           ->IntoEl());
-        } else {
-            row->Child(gpc::Checkbox::New(cx, GpuiDup(cx->a, id))
-                           ->Label(GpuiDup(cx->a, text))
-                           ->Checked(layer->on)
-                           ->Disabled(layer->locked)
-                           ->WithSize(gp::UiSize::Small)
-                           ->TabStop(false)
-                           ->OnClick(gp::ListenerArg(click, i))
-                           ->IntoEl());
+                          ->PadR(pad)
+                          ->PadL(pad + (float)layer->depth * indent)
+                          ->Gap(pad)
+                          ->Bg(rowBg)
+                          ->AriaSelected(selected)
+                          ->OnMouseDown(gp::ListenerArg(down, i));
+        if (layer->kind != PdfLayerKind::Label) {
+            auto role = layer->kind == PdfLayerKind::Radio ? gp::AccessibilityRole::RadioButton
+                                                           : gp::AccessibilityRole::CheckBox;
+            row->Role(role)
+                ->AriaLabel(GpuiDup(cx->a, layer->text))
+                ->AriaDisabled(layer->locked)
+                ->AriaToggled(layer->on ? gp::AccessibilityToggled::True : gp::AccessibilityToggled::False);
+            auto* box = gp::ArenaNew<LayerBox>(cx->a);
+            *box = LayerBox{rowFg, rowBg, layer->kind, layer->on, boxPx, scale};
+            gp::El* graphic = gp::Div(cx->a)->W(boxDx)->H(boxDx)->Shrink0();
+            graphic->customPaint = &PaintLayerBox;
+            graphic->customUser = box;
+            row->Child(graphic);
         }
+        row->Child(gp::TextEl(cx->a, GpuiDup(cx->a, layer->text))->Font(font)->Fg(rowFg)->Flex1()->MinW(0)->Truncate());
         list->Child(row);
     }
     gp::El* scroll = gp::Div(cx->a)
@@ -2774,6 +2932,7 @@ static gp::El* BuildLayersPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
                          ->MinH(0)
                          ->ScrollY(ui->layersScrollY)
                          ->ScrollFromPath()
+                         ->BoundsOut(&ui->layersView)
                          ->OnScroll(gp::ListenTo(ui->view, &SidebarView::OnLayersScroll))
                          ->Child(list);
     pane->Child(scroll);
@@ -2782,6 +2941,11 @@ static gp::El* BuildLayersPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
 
 static TempStr LayersTestTemp(MainWindow* win, Str op, int arg) {
     SidebarUI* ui = Ui(win);
+    if (str::Eq(op, StrL("layer-input-state"))) {
+        gp::Bounds r = ui->layersView;
+        return fmt("sel=%d x=%.2f y=%.2f dx=%.2f dy=%.2f rowDy=%.2f scroll=%.2f focused=%d", ui->layerSel, r.x, r.y,
+                   r.w, r.h, LayerRowDy(win), ui->layersScrollY, SidebarPanelHasFocus(win, SidebarSlot::Top) ? 1 : 0);
+    }
     if (str::Eq(op, StrL("layers-show"))) {
         SidebarToggleLayers(win);
     } else if (str::Eq(op, StrL("layer-toggle"))) {
@@ -2797,7 +2961,33 @@ static TempStr LayersTestTemp(MainWindow* win, Str op, int arg) {
     return ToStrTemp(out);
 }
 
-// Up / Down move the selection, Space turns the selected row's layer on or off
+static int ListNavRow(int vkey, int sel, int nRows, float viewH, float rowDy) {
+    int perPage = std::max(1, (int)(viewH / rowDy));
+    switch (vkey) {
+        case VK_UP:
+            sel = sel < 0 ? 0 : sel - 1;
+            break;
+        case VK_DOWN:
+            sel = sel < 0 ? 0 : sel + 1;
+            break;
+        case VK_PRIOR:
+            sel = sel < 0 ? 0 : sel - perPage;
+            break;
+        case VK_NEXT:
+            sel = sel < 0 ? 0 : sel + perPage;
+            break;
+        case VK_HOME:
+            sel = 0;
+            break;
+        case VK_END:
+            sel = nRows - 1;
+            break;
+        default:
+            return -1;
+    }
+    return limitValue(sel, 0, nRows - 1);
+}
+
 static bool LayersOnKeyDown(MainWindow* win, SidebarUI* ui, int vkey) {
     int n = len(ui->layerRows);
     if (n == 0) {
@@ -2807,26 +2997,155 @@ static bool LayersOnKeyDown(MainWindow* win, SidebarUI* ui, int vkey) {
         ToggleLayer(win, ui->layerSel);
         return true;
     }
-    if (vkey == VK_UP || vkey == VK_DOWN) {
-        int sel = ui->layerSel + (vkey == VK_DOWN ? 1 : -1);
-        ui->layerSel = limitValue(sel, 0, n - 1);
-        AppShellInvalidate(win);
-        return true;
+    int row = ListNavRow(vkey, ui->layerSel, n, ui->layersView.h, LayerRowDy(win));
+    if (row < 0) {
+        return false;
     }
-    return false;
+    SelectLayerRow(win, ui, row);
+    AppShellInvalidate(win);
+    return true;
+}
+
+static float SignatureRowDy(MainWindow* win) {
+    return (float)std::max(1, AppShellDpiPx(win, kSigRowDy)) * CanvasScale(win);
+}
+
+static PdfSigResult* CurrentSigRows(MainWindow* win) {
+    WindowTab* tab = win->CurrentTab();
+    return tab ? tab->signatures : nullptr;
+}
+
+void SidebarSelectSignature(MainWindow* win, int row) {
+    PdfSigResult* sigs = CurrentSigRows(win);
+    if (!sigs || row < 0 || row >= len(sigs->entries)) {
+        return;
+    }
+    SidebarUI* ui = Ui(win);
+    ui->signatureSel = row;
+    ui->signatureScrollY =
+        ScrollToRow(ui->signatureScrollY, ui->signatureView.h, row, len(sigs->entries), SignatureRowDy(win));
+    const PdfSigEntry* entry = sigs->entries[row];
+    if (win->ctrl && entry->pageNo > 0 && entry->pageNo <= win->ctrl->PageCount()) {
+        win->ctrl->GoToPage(entry->pageNo, true);
+    }
+    AppShellInvalidate(win);
+}
+
+void SidebarView::OnSignatureDown(SidebarView* self, gp::Ctx* cx, const gp::MouseDownEvent* ev, int64_t row) {
+    MainWindow* win = self->win;
+    SidebarSelectSignature(win, (int)row);
+    PdfSigResult* sigs = CurrentSigRows(win);
+    if (sigs && row >= 0 && row < len(sigs->entries) && ev->button == gp::MouseButton::Left && ev->clickCount == 2) {
+        ShowSignatureDialog(win, sigs->entries[(int)row]);
+    }
+    gp::Notify(cx);
+}
+
+void SidebarView::OnSignaturesScroll(SidebarView* self, gp::Ctx* cx, const gp::ScrollEvent* ev) {
+    Ui(self->win)->signatureScrollY = ev->offsetY;
+    gp::Notify(cx);
+}
+
+void SidebarView::OnSignaturesClose(SidebarView* self, gp::Ctx* cx, const gp::ClickEvent*) {
+    SidebarSlot slot;
+    if (ShownSlot(self->win, SidebarContent::Signatures, &slot)) {
+        HidePanel(self->win, slot);
+        ScheduleSaveSettings();
+    }
+    gp::Notify(cx);
+}
+
+static bool SignaturesOnKeyDown(MainWindow* win, SidebarUI* ui, int vkey) {
+    PdfSigResult* sigs = CurrentSigRows(win);
+    if (!sigs || len(sigs->entries) == 0) {
+        return false;
+    }
+    int row = ListNavRow(vkey, ui->signatureSel, len(sigs->entries), ui->signatureView.h, SignatureRowDy(win));
+    if (row < 0) {
+        return false;
+    }
+    SidebarSelectSignature(win, row);
+    return true;
+}
+
+static gp::El* BuildSignaturesPane(MainWindow* win, gp::Ctx* cx, SidebarSlot slot) {
+    SidebarUI* ui = Ui(win);
+    if (ui->signatureTab != win->CurrentTab()) {
+        SidebarResetSignatureRows(win);
+    }
+    Color bg = ThemeControlBackgroundColor();
+    Color fg = ThemeWindowTextColor();
+    Color selBg = AccentColor(ThemeWindowBackgroundColor(), 25);
+    float scale = CanvasScale(win);
+    float pad = (float)AppShellDpiPx(win, kSigRowPadDx) * scale;
+    float iconDx = (float)AppShellDpiPx(win, kSigRowIconDx) * scale;
+    float rowDy = SignatureRowDy(win);
+    float font = ListFontDip(win);
+    gp::El* pane = gp::Div(cx->a)->FlexCol()->SizeFull()->Bg(ToGpui(bg));
+    pane->Child(PaneHeader(win, cx, true, slot, StrL("signature-close"),
+                           gp::ListenTo(ui->view, &SidebarView::OnSignaturesClose)));
+
+    gp::El* list = gp::Div(cx->a)->FlexCol()->W(gp::kFill);
+    if (PdfSigResult* sigs = CurrentSigRows(win)) {
+        gp::Listener down = gp::ListenTo(ui->view, &SidebarView::OnSignatureDown, 0);
+        for (int i = 0; i < len(sigs->entries); i++) {
+            const PdfSigEntry* entry = sigs->entries[i];
+            bool selected = i == ui->signatureSel;
+            Str signer = len(entry->signer) > 0 ? entry->signer : Tr("Unknown signer");
+            gp::El* labels = gp::Div(cx->a)->FlexCol()->Flex1()->MinW(0);
+            labels->Child(
+                gp::TextEl(cx->a, GpuiDup(cx->a, signer))->H(rowDy / 2)->Font(font)->Fg(ToGpui(fg))->Truncate());
+            labels->Child(gp::TextEl(cx->a, GpuiDup(cx->a, entry->status))
+                              ->H(rowDy / 2)
+                              ->Font(font)
+                              ->Fg(ToGpui(AccentColor(fg, 40)))
+                              ->Truncate());
+            list->Child(gp::Div(cx->a)
+                            ->FlexRow()
+                            ->W(gp::kFill)
+                            ->H(rowDy)
+                            ->Shrink0()
+                            ->ItemsCenter()
+                            ->PadX(pad)
+                            ->Gap(pad)
+                            ->Bg(ToGpui(selected ? selBg : bg))
+                            ->Role(gp::AccessibilityRole::ListBoxOption)
+                            ->AriaSelected(selected)
+                            ->OnMouseDown(gp::ListenerArg(down, i))
+                            ->Child(SignatureIcon(cx, entry->verdict, iconDx))
+                            ->Child(labels));
+        }
+    }
+    pane->Child(gp::Div(cx->a)
+                    ->Id(GStrL("signatures-list"))
+                    ->TrackFocus(SlotFocus(ui, slot))
+                    ->FocusOnPress()
+                    ->TabStop(false)
+                    ->FocusRing()
+                    ->FlexCol()
+                    ->Flex1()
+                    ->W(gp::kFill)
+                    ->MinH(0)
+                    ->ScrollY(ui->signatureScrollY)
+                    ->ScrollFromPath()
+                    ->BoundsOut(&ui->signatureView)
+                    ->OnScroll(gp::ListenTo(ui->view, &SidebarView::OnSignaturesScroll))
+                    ->Child(list));
+    return pane;
 }
 
 // the top pane's height with the bottom one showing (TocDy), and the middle
 // one's (SidebarMiddleDy); the bottom pane takes the rest
 static int TopPaneDy(MainWindow* win) {
-    int contentDy = win->canvasRc.dy;
+    int contentDy = (int)std::round((float)win->canvasRc.dy / CanvasScale(win));
     int nPanes = win->uiState.middleVisible ? 3 : 2;
     int tocDy = gSettings->tocDy > 0 ? gSettings->tocDy : contentDy / nPanes;
     return limitValue(tocDy, kTocMinDy, std::max(kTocMinDy, contentDy - (nPanes - 1) * kTocMinDy));
 }
 
 static int MiddlePaneDy(MainWindow* win, int tocDy) {
-    int restDy = win->canvasRc.dy - tocDy - kSplitterDy;
+    int contentDy = (int)std::round((float)win->canvasRc.dy / CanvasScale(win));
+    int restDy = contentDy - tocDy - kSplitterDy;
     int middleDy = gSettings->sidebarMiddleDy > 0 ? gSettings->sidebarMiddleDy : restDy / 2;
     return limitValue(middleDy, kTocMinDy, std::max(kTocMinDy, restDy - kTocMinDy));
 }
@@ -2850,6 +3169,9 @@ gp::El* SidebarBuild(MainWindow* win, gp::Ctx* cx) {
         if (content == SidebarContent::Layers) {
             return BuildLayersPane(win, cx, slot);
         }
+        if (content == SidebarContent::Signatures) {
+            return BuildSignaturesPane(win, cx, slot);
+        }
         return BuildTocPane(win, cx, slot);
     };
 
@@ -2862,16 +3184,19 @@ gp::El* SidebarBuild(MainWindow* win, gp::Ctx* cx) {
     // both panes: orig's favSplitter between them. TocDy is the height of the
     // bookmarks pane.
     const gp::Theme& th = gp::ThemeNow(cx->app);
-    int tocDy = TopPaneDy(win);
+    int tocPx = TopPaneDy(win);
+    float scale = CanvasScale(win);
+    float tocDy = (float)tocPx * scale;
+    float splitDy = (float)kSplitterDy * scale;
     bool middle = win->uiState.middleVisible;
-    int middleDy = middle ? MiddlePaneDy(win, tocDy) : 0;
+    float middleDy = middle ? (float)MiddlePaneDy(win, tocPx) * scale : 0.f;
     gp::El* col = gp::Div(cx->a)->FlexCol()->SizeFull();
-    col->Child(gp::Div(cx->a)->FlexCol()->W(gp::kFill)->H((float)tocDy)->Shrink0()->Child(build(SidebarSlot::Top)));
-    col->Child(gp::Div(cx->a)->H((float)kSplitterDy)->W(gp::kFill)->Shrink0()->Bg(th.border));
+    col->Child(gp::Div(cx->a)->FlexCol()->W(gp::kFill)->H(tocDy)->Shrink0()->Child(build(SidebarSlot::Top)));
+    col->Child(gp::Div(cx->a)->H(splitDy)->W(gp::kFill)->Shrink0()->Bg(th.border));
     if (middle) {
         gp::El* pane = build(SidebarSlot::Middle);
-        col->Child(gp::Div(cx->a)->FlexCol()->W(gp::kFill)->H((float)middleDy)->Shrink0()->Child(pane));
-        col->Child(gp::Div(cx->a)->H((float)kSplitterDy)->W(gp::kFill)->Shrink0()->Bg(th.border));
+        col->Child(gp::Div(cx->a)->FlexCol()->W(gp::kFill)->H(middleDy)->Shrink0()->Child(pane));
+        col->Child(gp::Div(cx->a)->H(splitDy)->W(gp::kFill)->Shrink0()->Bg(th.border));
     }
     col->Child(gp::Div(cx->a)->FlexCol()->Flex1()->MinH(0)->W(gp::kFill)->Child(build(SidebarSlot::Bottom)));
     // ng: the grab strip goes last and absolute, so it is the topmost hit rect
@@ -2879,8 +3204,8 @@ gp::El* SidebarBuild(MainWindow* win, gp::Ctx* cx) {
     col->Child(gp::Div(cx->a)
                    ->Absolute()
                    ->Left(0)
-                   ->Top((float)tocDy)
-                   ->H((float)kSplitterDy)
+                   ->Top(tocDy)
+                   ->H(splitDy)
                    ->W(gp::kFill)
                    ->Cursor(gp::CursorKind::RowResize)
                    ->PathClick(GStrL("fav-splitter"))
@@ -2892,8 +3217,8 @@ gp::El* SidebarBuild(MainWindow* win, gp::Ctx* cx) {
         col->Child(gp::Div(cx->a)
                        ->Absolute()
                        ->Left(0)
-                       ->Top((float)(tocDy + kSplitterDy + middleDy))
-                       ->H((float)kSplitterDy)
+                       ->Top(tocDy + splitDy + middleDy)
+                       ->H(splitDy)
                        ->W(gp::kFill)
                        ->Cursor(gp::CursorKind::RowResize)
                        ->PathClick(GStrL("middle-splitter"))

@@ -61,6 +61,7 @@
 #include "Toolbar.h"
 #include "TableOfContents.h"
 #include "gui/Sidebar.h"
+#include "SignatureUI.h"
 #include "gui/TabsUI.h"
 #include "gui/TabSwitcher.h"
 #include "HomePage.h"
@@ -316,9 +317,6 @@ MainWindow::MainWindow(gpui::Window* w) {
         SidebarContentFromStr(gSettings ? gSettings->sidebarBottomView : Str{}, SidebarContent::Favorites);
     sidebarMiddleContent = SidebarContent::Thumbnails;
     sidebarDx = gSettings ? gSettings->sidebarDx : 0;
-    if (sidebarDx < kSidebarMinDx) {
-        sidebarDx = kSidebarMinDx;
-    }
     linkHandler = new LinkHandler(this);
     cbHandler = CreateControllerCallbackHandler(this);
     tabSelectionHistory = new Vec<WindowTab*>();
@@ -415,7 +413,15 @@ Vec<WindowTab*> MainWindow::Tabs() const {
 }
 
 Size MainWindow::GetViewPortSize() const {
-    return Size{canvasRc.dx, canvasRc.dy};
+    Size size = canvasRc.Size();
+#if OS_WIN
+    // On Windows the canvas paints and hit-tests model coordinates in device pixels.
+    if (gpuiWin) {
+        size.dx = gp::DipToPx(&gpuiWin->paint, (float)size.dx);
+        size.dy = gp::DipToPx(&gpuiWin->paint, (float)size.dy);
+    }
+#endif
+    return size;
 }
 
 // orig's deferred canvas repaint: here every repaint is the next frame
@@ -458,6 +464,7 @@ void FillAppCommandCtx(AppCommandCtx& ctx, MainWindow* win) {
     ctx.clipboardHasImage = ImageEditHasClipboard(win);
     ctx.clipboardReadAsync = OS_WASM;
     ctx.hasLayers = SidebarHasLayers(win);
+    ctx.hasSignatures = TabHasSignatures(ctx.tab);
 }
 
 // (0, 0) is "no point": keep the hover. A real point is hit-tested

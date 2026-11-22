@@ -32,6 +32,7 @@
 #include "SumatraPDF.h"
 #include "MainWindow.h"
 #include "ReadingBar.h"
+#include "MeasurementToolbar.h"
 #include "ReadingAutoScroll.h"
 #include "AIChatTypes.h"
 #include "WindowTab.h"
@@ -40,6 +41,7 @@
 #include "SearchAndDDE.h"
 #include "FindBar.h"
 #include "SelectionToolbar.h"
+#include "TranslatePopup.h"
 #include "TableOfContents.h"
 #include "DocumentProperties.h"
 #include "SumatraDialogs.h"
@@ -129,7 +131,9 @@ void SaveCurrentWindowTab(MainWindow* win) {
     // the tab (HideFindBar also drops the cached results so the next tab can't
     // show or navigate into the old document's matches)
     HideFindBar(win);
+    DismissTranslatePopup(win);
     HideSelectionToolbar(win);
+    CloseMeasurement(win);
     ReadingAutoScrollHideBar(win);
     ReadingBarCancelDrag(win);
 
@@ -157,6 +161,7 @@ void LoadModelIntoTab(WindowTab* tab) {
     // as orig: the modes hold page positions of the outgoing document; end them
     // while win->ctrl is still that document
     if (win->currentTabTemp && win->currentTabTemp != tab) {
+        CloseMeasurement(win);
         StopKeyboardLinkFollowing(win);
         StopSelectTextWithKeyboard(win);
         CancelAnnotationPlacement(win);
@@ -335,11 +340,12 @@ void RemoveTab(WindowTab* tab) {
     RemoveNotificationsForTab(tab);
     VecRemove(*win->tabSelectionHistory, tab);
     bool closedCurrentTab = IsCurrentTab(win, tab);
-    VecRemoveAt(win->tabs, idx);
     if (closedCurrentTab) {
+        DismissTranslatePopup(win);
         win->ctrl = nullptr;
         win->currentTabTemp = nullptr;
     }
+    VecRemoveAt(win->tabs, idx);
     TabsUIOnTabsChanged(win);
 
     int nTabs = win->TabCount();
@@ -456,6 +462,7 @@ void CloseAllTabs(MainWindow* win) {
 
 // Called when we're closing an entire window (quitting)
 void TabsOnCloseWindow(MainWindow* win) {
+    DismissTranslatePopup(win);
     // Clear these BEFORE destroying tabs: deleting a tab frees its
     // DisplayModel, and anything that still asks the window for its controller
     // in between would read a freed one

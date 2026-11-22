@@ -1160,7 +1160,7 @@ void NavFilesView::OnClose(NavFilesView*, gp::Ctx* cx, const gp::ClickEvent*) {
 static int NavMaxDx(MainWindow* win) {
     int sidebarDx = 0;
     if ((win->uiState.tocVisible || win->uiState.favVisible) && !AppShellSidebarFloats(win)) {
-        sidebarDx = win->sidebarDx + kSplitterDx;
+        sidebarDx = AppShellSidebarColumnDip(win);
     }
     int avail = win->frameRc.dx - sidebarDx - AIChatPanelDx(win) - kMinDocCanvasDx - kSplitterDx;
     return std::max(avail, kNavMinClientDx);

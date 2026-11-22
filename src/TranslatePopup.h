@@ -2,6 +2,8 @@
 
 struct MainWindow;
 
+HWND NewTranslateScrollPane(HWND parent);
+void RepaintTranslateScrollPane(HWND pane);
 void ShowTranslatePopup(MainWindow* win);
 void UpdateTranslatePopup(MainWindow* win);
 void HideTranslatePopup(MainWindow* win);

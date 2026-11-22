@@ -52,6 +52,11 @@ enum class ToolWinModal {
     Yes, // the main window takes no input while this one is up
 };
 
+enum class ToolWinDiagnosticText {
+    Include,
+    Omit,
+};
+
 struct ToolWindowDesc {
     // how the automation channel names it (TestToolWindow)
     const char* name = nullptr;
@@ -63,6 +68,8 @@ struct ToolWindowDesc {
     ToolWinStyle style = ToolWinStyle::Normal;
     ToolWinActivate activate = ToolWinActivate::Yes;
     ToolWinModal modal = ToolWinModal::No;
+    // omit text from automation diagnostics for windows displaying sensitive data
+    ToolWinDiagnosticText diagnosticText = ToolWinDiagnosticText::Include;
     // smallest client size (dips) a resizable one can be dragged to
     Size minClient;
     // largest; a 0 side is unbounded
@@ -120,10 +127,12 @@ void ToolWindowClose(ToolWindow* tw);
 ToolWindow* ToolWindowFind(Str name);
 // false once the window is gone (closed, or its owner was)
 bool ToolWindowIsLive(ToolWindow* tw);
+bool ToolWindowIsSizing(ToolWindow* tw);
 // the tool window of `win` that is the active window, if one is
 ToolWindow* ToolWindowActiveOf(MainWindow* win);
 // the modal window that keeps `win` disabled, if one is up (the topmost)
 ToolWindow* ToolWindowModalOf(MainWindow* win);
+bool ToolWindowRedactsText(const ToolWindow* tw);
 // orig's modal dialog (RunModalWindow): a captioned window of a fixed size,
 // owned by the main window, which takes no input while it is up
 ToolWindowDesc ToolWindowModalDesc(const char* name, Str (*title)());

@@ -21,15 +21,11 @@ gpui::App* AppShellGetApp();
 void AppShellSetApp(gpui::App*);
 // runs the event loop until the last window closes
 int AppShellRun(gpui::App* app);
-// height of the menu bar row above the canvas, in dips. Zero where the
-// menu bar is the OS one (macOS) rather than a row of the window.
+// height of the menu bar row above the canvas, in dips.
 constexpr int kMenuBarDy = 28;
-// true when the menu bar is the OS one, not a row of the window
-bool AppShellNativeMenu();
-// install the OS menu bar from the window's model. No-op when the bar is
-// drawn into the window, and when this window is not the front one.
+// sync the Mac application and Window menus for the front window
 void AppShellSyncMenu(MainWindow* win);
-// the model was rebuilt; the next sync of the front window reinstalls it
+// the model was rebuilt; the UI language may have changed
 void AppShellMenuRebuilt(MainWindow* win);
 
 void AppShellInvalidate(MainWindow* win);
@@ -97,6 +93,9 @@ bool AppShellCaptionRects(MainWindow* win, Rect* menuOut, Rect* tabsOut, int* dy
 bool AppShellSysMenuRect(MainWindow* win, Rect* out);
 // the border the frame keeps around its content while it has the caption
 int AppShellFrameBorder(MainWindow* win);
+int AppShellSidebarWidthPx(MainWindow* win);
+float AppShellSidebarWidthDip(MainWindow* win);
+int AppShellSidebarColumnDip(MainWindow* win);
 bool AppShellSidebarFloats(MainWindow* win);
 void AppShellSidebarCanvasMove(MainWindow* win, const gpui::MouseMoveEvent* ev);
 // gpui's client-side title bar for the frame, without touching the flag

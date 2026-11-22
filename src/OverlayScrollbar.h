@@ -14,9 +14,11 @@ struct OverlayScrollbar {
 
     // Smart: thin/thick transitions based on mouse proximity
     // Thick: always shown thick, no transitions
+    // Thin: shown at a fixed thin width when the owner reports activity
     enum class Mode {
         Smart,
         Thick,
+        Thin,
     };
 
     enum class State {

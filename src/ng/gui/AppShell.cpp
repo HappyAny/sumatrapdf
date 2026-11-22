@@ -57,6 +57,7 @@
 #include "CommandPalette.h"
 #include "Selection.h"
 #include "SelectionToolbar.h"
+#include "TranslatePopup.h"
 #include "LinkFollow.h"
 #include "SearchAndDDE.h"
 #include "FindBar.h"
@@ -64,6 +65,7 @@
 #include "Toolbar.h"
 #include "OverlayScrollbar.h"
 #include "ReadingBar.h"
+#include "MeasurementToolbar.h"
 #include "ReadingAutoScroll.h"
 #include "ReadAloud.h"
 #include "SelectTextKeyboard.h"
@@ -227,7 +229,7 @@ constexpr int kCaptionTopPadding = 8;
 // everything it lays out (not when maximized or fullscreen)
 constexpr int kFrameBorderSize = 1;
 // orig's capTabsRow1: the tab strip is 2 px taller in the one-row caption
-constexpr int kCaptionTabBarDy = kTabBarDy + 2;
+constexpr int kCaptionTabExtraPx = 2;
 constexpr int kTabsButtonGapX = 32;
 // size (DIP) of the min/max/restore/close caption glyphs
 constexpr int kCaptionGlyphDip = 10;
@@ -272,6 +274,15 @@ static bool ShowCaption(MainWindow* win) {
     return win->tabsInTitlebar && !win->IsFullScreenOrPresentation();
 }
 
+static int CaptionPaddingDip(MainWindow* win, int px) {
+#if OS_WIN
+    return px * 96 / std::max(1, AppShellWindowDpi(win));
+#else
+    (void)win;
+    return px;
+#endif
+}
+
 // orig's SyncCaptionLayout sizes: the window buttons span the padding above
 // the tabs too, the app icon matches the tab band
 static int CaptionWinBtnDy(MainWindow* win, bool twoRow) {
@@ -279,7 +290,7 @@ static int CaptionWinBtnDy(MainWindow* win, bool twoRow) {
         return kMenuBarDy;
     }
     int pad = win->isMaximized ? 0 : kCaptionTopPadding;
-    return pad + kTabBarDy + 2;
+    return kTabBarDy + CaptionPaddingDip(win, pad + kCaptionTabExtraPx);
 }
 
 int AppShellFrameBorder(MainWindow* win) {
@@ -298,7 +309,7 @@ bool AppShellCaptionRects(MainWindow* win, Rect* menuOut, Rect* tabsOut, int* dy
     if (!ShowCaption(win) || (!gSettings->showCaption && !win->captionOverlayShown)) {
         return false;
     }
-    bool twoRow = win->isMenuBarVisible && !gp::AppHasMenuBar();
+    bool twoRow = win->isMenuBarVisible;
     int winBtn = CaptionWinBtnDy(win, twoRow);
     bool hasTabs = TabsAreVisible(win);
     int border = AppShellFrameBorder(win);
@@ -310,8 +321,8 @@ bool AppShellCaptionRects(MainWindow* win, Rect* menuOut, Rect* tabsOut, int* dy
         return true;
     }
     *menuOut = Rect{};
-    *tabsOut =
-        Rect{border + kTabBarDy, border + winBtn - kCaptionTabBarDy, win->tabsAvailDx, hasTabs ? kCaptionTabBarDy : 0};
+    int tabsDy = kTabBarDy + CaptionPaddingDip(win, kCaptionTabExtraPx);
+    *tabsOut = Rect{border + kTabBarDy, border + winBtn - tabsDy, win->tabsAvailDx, hasTabs ? tabsDy : 0};
     return true;
 }
 
@@ -458,14 +469,14 @@ static void BuildCaption(ShellView* self, gp::Ctx* cx, gp::El* root, bool twoRow
     } else {
         int frameDx = win->frameRc.dx - 2 * AppShellFrameBorder(win);
         win->tabsAvailDx = std::max(0, frameDx - tabBtn - kTabsButtonGapX - 3 * winBtn);
-        tabs = TabsUIBuild(win, cx, kCaptionTabBarDy);
+        int tabsDy = kTabBarDy + CaptionPaddingDip(win, kCaptionTabExtraPx);
+        tabs = TabsUIBuild(win, cx, tabsDy);
         if (tabs) {
-            row1->Child(gp::Div(cx->a)->Flex1()->MinW(0)->H((float)kCaptionTabBarDy)->Child(tabs));
+            row1->Child(gp::Div(cx->a)->Flex1()->MinW(0)->H((float)tabsDy)->Child(tabs));
         } else {
             // a window without tabs still has orig's menu button
             if (gp::El* menuBtn = TabsUIMenuButton(win, cx)) {
-                row1->Child(
-                    gp::Div(cx->a)->FlexRow()->ItemsCenter()->H((float)kCaptionTabBarDy)->Shrink0()->Child(menuBtn));
+                row1->Child(gp::Div(cx->a)->FlexRow()->ItemsCenter()->H((float)tabsDy)->Shrink0()->Child(menuBtn));
             }
             row1->Child(gp::Div(cx->a)->Flex1()->H((float)winBtn)->Click(gp::ClickWinCaption));
         }
@@ -800,7 +811,7 @@ TempStr AppShellUiStateTemp(MainWindow* win) {
     str::Builder out;
     out.Append(fmt("focus frame=%d edit=%d id=%d", !dlgWin && !paletteWin && AppShellIsFrameFocused(win) ? 1 : 0,
                    edit ? 1 : 0, gp::WindowFocusedId(focusWin)));
-    if (edit) {
+    if (edit && !focusWin->input->masked && !ToolWindowRedactsText(modal)) {
         gp::Str v = gp::InputValue(focusWin->input);
         out.Append(fmt(" editText='%s'", Str{(char*)v.s, (int)v.len}));
     }
@@ -1448,9 +1459,7 @@ static void BindKeys() {
 // The macOS menu bar belongs to the process, so only the front window
 // installs it. A rebuild of a background window waits until that window
 // is the front one.
-static bool gMenuDirty = true;
-static MainWindow* gMenuOwner = nullptr;
-static bool gMenuVis = true;
+static Str gNativeMenuLang;
 
 static bool WindowOwnsAppMenu(MainWindow* win) {
     if (!win || !win->gpuiWin) {
@@ -1471,61 +1480,10 @@ static bool WindowOwnsAppMenu(MainWindow* win) {
     return win == last;
 }
 
-static bool MenuContainsCmd(const MenuModel* menu, int cmdId) {
-    if (!menu) {
-        return false;
-    }
-    for (const MenuItemModel& it : menu->items) {
-        if (it.cmdId == cmdId) {
-            return true;
-        }
-        if (MenuContainsCmd(it.submenu, cmdId)) {
-            return true;
-        }
-    }
-    return false;
-}
-
-// One MenuModel level as gpui rows. Labels are temp strings; AppSetMenus
-// copies them before it returns.
-static int FillMenuRows(gp::MenuRow* dst, const MenuModel* menu) {
-    int n = 0;
-    for (const MenuItemModel& it : menu->items) {
-        gp::MenuRow& row = dst[n++];
-        if (it.separator) {
-            row.separator = true;
-            continue;
-        }
-        row.label = ToGpui(ParseMenuAccelTextTemp(it.title).display);
-        row.disabled = it.disabled;
-        if (it.submenu) {
-            int subN = it.submenu->items.len;
-            gp::MenuRow* sub = subN > 0 ? AllocArrayTemp<gp::MenuRow>(subN) : nullptr;
-            row.submenu = sub;
-            row.submenuN = sub ? FillMenuRows(sub, it.submenu) : 0;
-            continue;
-        }
-        row.action = ActSumatraCmd();
-        row.arg = it.cmdId;
-        row.checked = it.checked;
-    }
-    return n;
-}
-
-// AppKit shows the first menu under the process name, whatever it is
-// called here, so the application's own menu comes before File. The
-// Window menu is the one AppKit keeps Minimize and the window list in.
-static void InstallNativeMenu(MainWindow* win) {
-    int nTop = 0;
-    for (const MenuItemModel& it : win->menu->items) {
-        if (it.submenu) {
-            nTop++;
-        }
-    }
-    gp::MenuDef* defs = AllocArrayTemp<gp::MenuDef>(nTop + 2);
-    int n = 0;
-
-    gp::MenuRow* appRows = AllocArrayTemp<gp::MenuRow>(4);
+// Keep the Mac application and window menus in AppKit. The document menus
+// use the in-window bar on every platform.
+static void InstallNativeMenu() {
+    gp::MenuRow appRows[4]{};
     appRows[0].label = ToGpui(ParseMenuAccelTextTemp(Tr("&About")).display);
     appRows[0].action = ActSumatraCmd();
     appRows[0].arg = CmdHelpAbout;
@@ -1537,42 +1495,15 @@ static void InstallNativeMenu(MainWindow* win) {
     appRows[3].action = ActSumatraCmd();
     appRows[3].arg = CmdExit;
     appRows[3].stroke = "cmd-q";
-    defs[n].name = GStrL("SumatraPDF");
-    defs[n].items = appRows;
-    defs[n].n = 4;
-    n++;
-
-    gp::MenuDef windowDef = {};
-    windowDef.name = GStrL("Window");
-    bool windowPlaced = false;
-    for (const MenuItemModel& it : win->menu->items) {
-        if (!it.submenu) {
-            continue;
-        }
-        if (!windowPlaced && MenuContainsCmd(it.submenu, CmdHelpAbout)) {
-            defs[n++] = windowDef;
-            windowPlaced = true;
-        }
-        int subN = it.submenu->items.len;
-        gp::MenuRow* sub = subN > 0 ? AllocArrayTemp<gp::MenuRow>(subN) : nullptr;
-        defs[n].name = ToGpui(ParseMenuAccelTextTemp(it.title).display);
-        defs[n].items = sub;
-        defs[n].n = sub ? FillMenuRows(sub, it.submenu) : 0;
-        defs[n].disabled = it.disabled;
-        n++;
-    }
-    if (!windowPlaced) {
-        defs[n++] = windowDef;
-    }
-    gp::AppSetMenus(gApp, defs, n);
-}
-
-bool AppShellNativeMenu() {
-    return gp::AppHasMenuBar();
+    gp::MenuDef defs[2]{};
+    defs[0].name = GStrL("SumatraPDF");
+    defs[0].items = appRows;
+    defs[0].n = dimofi(appRows);
+    defs[1].name = GStrL("Window");
+    gp::AppSetMenus(gApp, defs, dimofi(defs));
 }
 
 void AppShellMenuRebuilt(MainWindow* win) {
-    gMenuDirty = true;
     AppShellSyncMenu(win);
 }
 
@@ -1580,19 +1511,13 @@ void AppShellSyncMenu(MainWindow* win) {
     if (!gp::AppHasMenuBar() || !gApp || !WindowOwnsAppMenu(win)) {
         return;
     }
-    // ShowMenubar hides a row of a Windows window. Here the menu is the
-    // process menu bar; hiding it (the default once tabs are on) leaves none.
-    // Fullscreen hides the bar on its own.
-    if (!gMenuDirty && gMenuOwner == win && gMenuVis) {
+    Str lang = trans::GetCurrentLangCode();
+    if (str::Eq(gNativeMenuLang, lang)) {
         return;
     }
     gp::AppSetMenuBarVisible(true);
-    if (win->menu) {
-        InstallNativeMenu(win);
-    }
-    gMenuDirty = false;
-    gMenuOwner = win;
-    gMenuVis = true;
+    InstallNativeMenu();
+    gNativeMenuLang = lang;
 }
 
 // the label with orig's '&' letter underlined
@@ -1674,8 +1599,7 @@ static void UnderlineMenuBarTitle(gp::Ctx* cx, gp::El* bar, int barIdx, gp::Str 
 // matched here (orig lets win32 open the menu and underline the letter)
 static bool MenuBarOnAltKey(ShellView* self, gp::Ctx* cx, u16 vk) {
     MainWindow* win = self->win;
-    // the macOS menu bar is the system's; it has no Alt access keys
-    if (gp::AppHasMenuBar() || !win->menu) {
+    if (!win->menu) {
         return false;
     }
     if (vk < 'A' || vk > 'Z') {
@@ -1721,7 +1645,7 @@ static int MenuBarTitleCount(MainWindow* win) {
 // its first title, with no menu open
 static void MenuBarArm(ShellView* self, gp::Ctx* cx) {
     MainWindow* win = self->win;
-    if (gp::AppHasMenuBar() || !win->menu || MenuBarTitleCount(win) == 0) {
+    if (!win->menu || MenuBarTitleCount(win) == 0) {
         return;
     }
     auto* st = (gpc::AppMenuBarState*)gp::EntityGet(cx->app, self->menuBarState.id);
@@ -1793,25 +1717,23 @@ struct MenuKeyCmd {
 static void RunMenuKeyCmd(MenuKeyCmd* c) {
     if (IsMainWindowValidAndNotClosing(c->win)) {
         ExecuteCmd(c->win, c->cmdId);
-        AppShellInvalidate(c->win);
+        if (IsMainWindowValidAndNotClosing(c->win)) {
+            AppShellInvalidate(c->win);
+        }
     }
     delete c;
 }
 
-// ng: win32 runs the row whose access key is typed while a menu is open; a
-// gpui popup has no access keys, so the open menu's rows are matched here.
-// Only the menu hanging off the bar: a row inside an open submenu is not.
+// Search the active submenu for the key. Windows cycles the selection when
+// multiple enabled rows use the same mnemonic.
 static bool MenuOnAccessKey(ShellView* self, gp::Ctx* cx, u16 vk) {
     MainWindow* win = self->win;
-    if (gp::AppHasMenuBar()) {
-        return false;
-    }
     auto* st = (gpc::AppMenuBarState*)gp::EntityGet(cx->app, self->menuBarState.id);
     if (!win->menu || !st || st->selected < 0 || vk < 'A' || vk > 'Z') {
         return false;
     }
     gp::PopupMenuState* popupState = self->menuPopupIdx == st->selected ? self->menuPopupState.Get(cx) : nullptr;
-    if (!popupState || popupState->openSubmenu >= 0) {
+    if (!popupState || !popupState->open) {
         return false;
     }
     char key = (char)(vk - 'A' + 'a');
@@ -1823,28 +1745,55 @@ static bool MenuOnAccessKey(ShellView* self, gp::Ctx* cx, u16 vk) {
             break;
         }
     }
-    if (!model) {
+    while (model && popupState && popupState->openSubmenu >= 0) {
+        int row = popupState->openSubmenu;
+        if (row >= len(model->items) || row >= len(popupState->rows)) {
+            return false;
+        }
+        model = model->items[row].submenu;
+        popupState = popupState->rows[row].submenuState.Get(cx);
+    }
+    if (!model || !popupState) {
         return false;
     }
-    int row = -1;
-    for (const MenuItemModel& it : model->items) {
-        row++;
+
+    int first = -1;
+    int next = -1;
+    int count = 0;
+    for (int i = 0; i < len(model->items); i++) {
+        const MenuItemModel& it = model->items[i];
         if (it.separator || it.disabled || MenuAccessKey(it.title) != key) {
             continue;
         }
-        if (it.submenu) {
-            popupState->selected = row;
-            popupState->openSubmenu = row;
-            return true;
+        count++;
+        if (first < 0) {
+            first = i;
         }
-        // the popup holds the keyboard until it is gone, so the command runs
-        // after this frame
-        gpc::AppMenuBarSelect(st, cx, -1);
-        auto* c = new MenuKeyCmd{win, it.cmdId};
-        uitask::Post(MkFunc0<MenuKeyCmd>(RunMenuKeyCmd, c), "MenuKeyCmd");
+        if (next < 0 && i > popupState->selected) {
+            next = i;
+        }
+    }
+    if (first < 0) {
+        return false;
+    }
+    if (count > 1) {
+        popupState->selected = next >= 0 ? next : first;
         return true;
     }
-    return false;
+    const MenuItemModel& match = model->items[first];
+    if (match.submenu) {
+        popupState->selected = first;
+        gp::PopupMenuEnterSubmenu(popupState, cx, first);
+        return true;
+    }
+
+    // Run the command after the popup releases keyboard focus.
+    int cmdId = match.cmdId;
+    gp::PopupMenuDismissAll(popupState, cx);
+    gpc::AppMenuBarSelect(st, cx, -1);
+    auto* c = new MenuKeyCmd{win, cmdId};
+    uitask::Post(MkFunc0<MenuKeyCmd>(RunMenuKeyCmd, c), "MenuKeyCmd");
+    return true;
 }
 
 static gp::El* BuildMenuBar(ShellView* self, gp::Ctx* cx) {
@@ -1863,6 +1812,10 @@ static gp::El* BuildMenuBar(ShellView* self, gp::Ctx* cx) {
         if (wasDismissed) {
             gpc::AppMenuBarSelect(state, cx, -1);
         }
+    }
+    if (state && state->selected >= 0 && self->menuPopupIdx < 0) {
+        // Selection and zoom can change without a command dispatch.
+        RebuildMenuBar(win);
     }
 
     // orig's menu is win32's: the access keys show from an Alt press until
@@ -2010,6 +1963,40 @@ static gp::El* BuildCanvas(ShellView* self, gp::Ctx* cx, bool overlayUp) {
 static void BuildNotifications(MainWindow* win, gp::Ctx* cx, gp::El* parent);
 static bool HasNotificationsFor(MainWindow* win);
 
+static int SidebarBodyPx(MainWindow* win, int frameDx) {
+    float scale = CanvasScale(win);
+    int framePx = (int)std::round((float)frameDx / scale);
+    if (win->gpuiWin) {
+        gp::WinSize size = gp::WindowSize(win->gpuiWin);
+        if ((int)size.dipW == frameDx && size.pxW > 0) {
+            framePx = size.pxW;
+        }
+    }
+    return framePx - 2 * AppShellFrameBorder(win);
+}
+
+static int SidebarWidthPx(MainWindow* win, int frameDx) {
+    int bodyDx = SidebarBodyPx(win, frameDx);
+    int width = win->sidebarDx > 0 ? win->sidebarDx : bodyDx / 4;
+    return limitValue(width, kSidebarMinDx, std::max(kSidebarMinDx, bodyDx - kMinDocCanvasDx));
+}
+
+int AppShellSidebarWidthPx(MainWindow* win) {
+    int frameDx = win->frameRc.dx;
+    if (frameDx <= 0 && win->gpuiWin) {
+        frameDx = (int)gp::WindowSize(win->gpuiWin).dipW;
+    }
+    return SidebarWidthPx(win, frameDx);
+}
+
+float AppShellSidebarWidthDip(MainWindow* win) {
+    return (float)AppShellSidebarWidthPx(win) * CanvasScale(win);
+}
+
+int AppShellSidebarColumnDip(MainWindow* win) {
+    return (int)std::round((float)(AppShellSidebarWidthPx(win) + kSplitterDx) * CanvasScale(win));
+}
+
 // SidebarAutoHide (#5819): a shown sidebar floats over the canvas instead of
 // taking a column. Not in presentation.
 bool AppShellSidebarFloats(MainWindow* win) {
@@ -2029,7 +2016,7 @@ void AppShellSidebarCanvasMove(MainWindow* win, const gp::MouseMoveEvent* ev) {
     }
     bool onRight = gSettings->sidebarOnRight;
     float fromEdge = onRight ? ev->el.Right() - ev->x : ev->x - ev->el.x;
-    bool inColumn = fromEdge < (float)win->sidebarDx;
+    bool inColumn = fromEdge < AppShellSidebarWidthDip(win);
     if (!win->sidebarOverlayShown) {
         // a drag on the canvas (selection, pan) passing the edge doesn't show it
         if (ev->pressed || fromEdge >= kRevealDx) {
@@ -2076,7 +2063,8 @@ static void AddSidebarOverlay(ShellView* self, gp::Ctx* cx, gp::El* canvasCol, g
     }
     const gp::Theme& th = gp::ThemeNow(cx->app);
     bool onRight = gSettings->sidebarOnRight;
-    gp::El* el = gp::Div(cx->a)->Absolute()->Top(0)->Bottom(0)->FlexCol()->W((float)win->sidebarDx)->Child(sidebar);
+    gp::El* el =
+        gp::Div(cx->a)->Absolute()->Top(0)->Bottom(0)->FlexCol()->W(AppShellSidebarWidthDip(win))->Child(sidebar);
     el = onRight ? el->Right(0)->BorderL(1, th.border) : el->Left(0)->BorderR(1, th.border);
     canvasCol->Child(el);
 }
@@ -2118,9 +2106,10 @@ static gp::El* BuildBody(ShellView* self, gp::Ctx* cx, bool overlayUp) {
     gp::El* sidebarBox = nullptr;
     gp::El* splitter = nullptr;
     if (sidebar && !floats) {
-        sidebarBox = gp::Div(cx->a)->FlexCol()->W((float)win->sidebarDx)->H(gp::kFill)->Shrink0()->Child(sidebar);
+        sidebarBox =
+            gp::Div(cx->a)->FlexCol()->W(AppShellSidebarWidthDip(win))->H(gp::kFill)->Shrink0()->Child(sidebar);
         splitter = gp::Div(cx->a)
-                       ->W((float)kSplitterDx)
+                       ->W((float)kSplitterDx * CanvasScale(win))
                        ->H(gp::kFill)
                        ->Shrink0()
                        ->Bg(th.border)
@@ -2466,13 +2455,16 @@ void ShellView::OnSidebarResize(ShellView* self, gp::Ctx* cx, const gp::DragMove
     // not pop the overlay scrollbar out mid-drag
     gOverlayScrollbarSuppressThick = true;
     int border = AppShellFrameBorder(win);
-    int sidebarDx = (gSettings->sidebarOnRight ? win->frameRc.dx - (int)ev->event.x : (int)ev->event.x) - border;
+    float scale = CanvasScale(win);
+    float fromEdge = gSettings->sidebarOnRight ? (float)win->frameRc.dx - ev->event.x : ev->event.x;
+    int sidebarDx = (int)std::round((fromEdge - (float)border) / scale);
     // note: without the min/max(..., curDx), the sidebar will be
     //       stuck at its width if it accidentally got too wide or too narrow
     int curDx = win->sidebarDx;
     int minDx = std::min(kSidebarMinDx, curDx);
     // allow wider than half window (long Favorites names)
-    int maxDx = std::max(win->frameRc.dx - kMinDocCanvasDx, curDx);
+    int bodyPx = SidebarBodyPx(win, win->frameRc.dx);
+    int maxDx = std::max(bodyPx - kMinDocCanvasDx, curDx);
     // orig's splitter refuses the move and shows IDC_NO
     bool refused = sidebarDx < minDx || sidebarDx > maxDx;
     if (refused != self->splitterRefused) {
@@ -2559,8 +2551,7 @@ void ShellView::OnMouseDown(ShellView* self, gp::Ctx* cx, const gp::MouseDownEve
     // no longer alone
     self->menuKey = 0;
     // (a click on the bar itself opens a menu)
-    bool onMenuBar =
-        (self->win->isMenuBarVisible || self->menuBarTemp) && !gp::AppHasMenuBar() && ev->y < (float)kMenuBarDy;
+    bool onMenuBar = (self->win->isMenuBarVisible || self->menuBarTemp) && ev->y < (float)kMenuBarDy;
     if (self->menuArmedIdx >= 0 && !onMenuBar) {
         self->menuArmedIdx = -1;
         gp::Notify(cx);
@@ -2905,10 +2896,15 @@ void ShellView::OnKeyDown(ShellView* self, gp::Ctx* cx, const gp::KeyEvent* ev) 
             ReadingAutoScrollStop(win);
         } else if (ReadingBarIsOn(win)) {
             ReadingBarHide(win);
+        } else if (MeasurementOnEscape(win)) {
+            // Esc first cancels the measurement currently being clicked.
         } else if (IsFindEditFocused(win)) {
             // orig's FindBarWnd::OnKeyDown: Esc goes to the focused window
             HideFindBar(win);
         } else {
+            if (!ev->ctrl && !ev->alt && !ev->shift && !ev->platform) {
+                DismissTranslatePopup(win);
+            }
             // orig's FrameOnKeydown: the drag is cancelled and a selected
             // annotation leaves its edit mode (issue #5933), and the WM_CHAR
             // that follows still runs OnFrameKeyEsc
@@ -3373,7 +3369,7 @@ static Rect CanvasRcForFrame(MainWindow* win, int frameDx, int frameDy, bool men
     }
     int sidebarDx = 0;
     if ((win->uiState.tocVisible || win->uiState.favVisible) && !AppShellSidebarFloats(win)) {
-        sidebarDx = win->sidebarDx + kSplitterDx;
+        sidebarDx = (int)std::round((float)(SidebarWidthPx(win, frameDx) + kSplitterDx) * CanvasScale(win));
     }
     int bodyDy = frameDy - 2 * border - chromeDy - (tbAtBottom ? toolbarDy : 0);
     if (PageInfoBarTakesRow(win)) {
@@ -3439,7 +3435,7 @@ Rect AppShellPredictCanvasRc(MainWindow* win, CanvasPredict predict) {
     }
     bool wasMaximized = win->isMaximized;
     win->isMaximized = maximized;
-    bool menuBarShown = win->isMenuBarVisible && !gp::AppHasMenuBar();
+    bool menuBarShown = win->isMenuBarVisible;
     Rect canvas = CanvasRcForFrame(win, frameDx, frameDy, menuBarShown, tabsVisible);
     win->isMaximized = wasMaximized;
 #if OS_WASM
@@ -3473,11 +3469,10 @@ gp::El* ShellView::Render(ShellView* self, gp::Ctx* cx) {
     AppShellSyncMenu(win);
     gp::WinSize ws = gp::WindowSize(cx->win);
     win->frameRc = Rect{0, 0, (int)ws.dipW, (int)ws.dipH};
+    if (win->uiState.tocVisible || win->uiState.favVisible) {
+        win->sidebarDx = AppShellSidebarWidthPx(win);
+    }
     win->isMaximized = cx->win && cx->win->maximized;
-    // what is left for the document once the menu bar and the tab strip have
-    // taken their rows; step 7's canvas measures itself instead. On macOS
-    // the menu bar is the system's and takes no row of the window.
-    bool nativeMenu = gp::AppHasMenuBar();
     // orig's WM_EXITMENULOOP: hide the menu bar again if it was shown only
     // temporarily
     // as win32's menu loop: switching away lets go of the keyboard-armed bar,
@@ -3498,7 +3493,7 @@ gp::El* ShellView::Render(ShellView* self, gp::Ctx* cx) {
             self->menuBarTemp = false;
         }
     }
-    bool menuBarShown = (win->isMenuBarVisible || self->menuBarTemp) && !nativeMenu;
+    bool menuBarShown = win->isMenuBarVisible || self->menuBarTemp;
     // orig: tabsInTitlebar follows UseTabs
     SetTabsInTitlebar(win,
                       CanHaveTabsInTitlebar() && (SettingsUseTabs() || !gSettings->showCaption) && !win->isQuickLook);
@@ -3508,6 +3503,11 @@ gp::El* ShellView::Render(ShellView* self, gp::Ctx* cx) {
     }
     int border = AppShellFrameBorder(win);
     bool tbAtBottom = ToolbarAtBottom();
+    ShowOrHideToolbar(win);
+    gp::El* toolbar = nullptr;
+    if (!win->isToolbarOverlay) {
+        toolbar = ToolbarBuild(win, cx, win->frameRc.dx - 2 * border);
+    }
     win->canvasRc = CanvasRcForFrame(win, win->frameRc.dx, win->frameRc.dy, menuBarShown, TabsAreVisible(win));
 #if OS_DARWIN || OS_WASM
     ApplyRenderScale(win);
@@ -3556,7 +3556,9 @@ gp::El* ShellView::Render(ShellView* self, gp::Ctx* cx) {
             root->Child(tabs);
         }
     }
-    gp::El* toolbar = ToolbarBuild(win, cx);
+    if (win->isToolbarOverlay) {
+        toolbar = ToolbarBuild(win, cx, 0);
+    }
     if (toolbar && !win->isToolbarOverlay && !tbAtBottom) {
         root->Child(toolbar);
     }

@@ -72,6 +72,7 @@ TranslatePopupLangTo = zh-CN
 TranslatePopupCustomParams = {}
 TranslatePopupFont = Microsoft YaHei UI
 TranslatePopupFontSize = 11
+TranslatePopupLineSpacing = 100
 TranslatePopupBold = false
 TranslatePopupPosition = auto
 TranslatePopupAutoSize = true

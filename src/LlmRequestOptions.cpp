@@ -4,6 +4,7 @@
 #include "base/JsonParser.h"
 #include "LlmTranslate.h"
 #include "LlmRequestOptions.h"
+#include <cmath>
 
 constexpr int kLlmPromptLimit = 64 * 1024;
 constexpr int kLlmCustomLimit = 256 * 1024;
@@ -384,7 +385,7 @@ bool BuildLlmRequest(const LlmTranslateRequest& r, Str& body, Str& error) {
     const auto* to = FindLlmLanguage(len(r.langTo) ? r.langTo : StrL("zh-CN"));
     if (!from || !to || str::Eq(to->code, StrL("auto")))
         return LlmOptionError(error, StrL("请选择有效的源语言和目标语言。"));
-    if (!_finite(r.temperature) || r.temperature < 0 || r.temperature > 2)
+    if (!std::isfinite(r.temperature) || r.temperature < 0 || r.temperature > 2)
         return LlmOptionError(error, StrL("温度须为 0 到 2 之间的数值。"));
     Str thinking = len(r.thinking) ? r.thinking : StrL("off");
     if (!str::Eq(thinking, StrL("default")) && !str::Eq(thinking, StrL("off")) && !str::Eq(thinking, StrL("low")) &&

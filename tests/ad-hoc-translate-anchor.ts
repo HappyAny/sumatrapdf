@@ -3,7 +3,7 @@
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ControlClient, ControlCommand } from "./control.ts";
-import { cmdId, loadPng, makeTextPdf, pollUntil, runStandalone, tmpPath, writeAppdata } from "./util.ts";
+import { assemblePdf, cmdId, loadPng, makeTextPdf, pollUntil, runStandalone, tmpPath, writeAppdata } from "./util.ts";
 import { findCanvas, killAndWait, launchControlled, pressEscape, sendCommandSync } from "./win-automation.ts";
 import {
   captureWindowToPng,
@@ -13,6 +13,7 @@ import {
   findTopWindow,
   getClassName,
   getClientRect,
+  getControlText,
   getExtendedFrameBounds,
   getScrollInfo,
   getWindowLong,
@@ -20,6 +21,7 @@ import {
   getWindowPid,
   getWindowRect,
   getWorkArea,
+  isWindowEnabled,
   isWindowVisible,
   packCoords,
   repaintWindow,
@@ -27,10 +29,11 @@ import {
   setProcessDpiAware,
   setWindowPos,
 } from "./winapi.ts";
-import { comboItems, controlById, selectCombo, TranslateControl } from "./translate-test-controls.ts";
+import { comboItems, controlById, selectCombo, TranslateControl, translationBody } from "./translate-test-controls.ts";
 
 const TIMEOUT = 8000;
 const CALLOUT_GAP_DIP = 12;
+const COPY_BUTTON = 3001;
 const BM_CLICK = 0x00f5;
 const CB_GETCURSEL = 0x0147;
 const WM_NCHITTEST = 0x0084;
@@ -60,6 +63,11 @@ const ARROW_CLASS = "SumatraTranslateArrow";
 const TOOLBAR_CLASS = "SumatraSelectionToolbar";
 const TEXT = "选中文本的翻译应保持可见，并随页面移动。";
 const LONG_TEXT = (TEXT + "\n").repeat(48);
+const SOURCE_LINES = Array.from(
+  { length: 12 },
+  (_, i) => `Line ${i + 1} of the selected passage for the reading card.`,
+);
+const SOURCE = SOURCE_LINES.join("\n");
 const MODEL = "anchor-test-model";
 const KEY = "anchor-test-not-a-secret";
 const POSITIONS = { auto: "自动", top: "上方", bottom: "下方", left: "左侧", right: "右侧" } as const;
@@ -147,9 +155,13 @@ async function expectText(session: Session, text = TEXT): Promise<State> {
   return value;
 }
 
-async function drag(session: Session): Promise<void> {
-  const reply = await session.client.request(ControlCommand.TestRotatedTextMouseDrag, ["quick"]);
-  assert(String(reply[1] ?? "").includes("selected=quick\n"), `native selection failed: ${String(reply[1] ?? "")}`);
+async function drag(session: Session, text = "quick"): Promise<void> {
+  const reply = await session.client.request(ControlCommand.TestRotatedTextMouseDrag, [text]);
+  const expected = text.replaceAll("\n", " ");
+  assert(
+    String(reply[1] ?? "").includes(`selected=${expected}\n`),
+    `native selection failed: ${String(reply[1] ?? "")}`,
+  );
 }
 
 function popup(session: Session): number {
@@ -488,9 +500,21 @@ export async function testit(): Promise<void> {
   const pdf = tmpPath("translate-anchor.pdf");
   const roomyPdf = tmpPath("translate-anchor-roomy.pdf");
   const secondPdf = tmpPath("translate-anchor-second.pdf");
+  const sourcePdf = tmpPath("translate-anchor-long-source.pdf");
   writeFileSync(pdf, makeTextPdf("The quick brown fox reads a book."));
   writeFileSync(roomyPdf, makeTextPdf("A short lead. quick brown fox reads a book."));
   writeFileSync(secondPdf, makeTextPdf("The other document has no selection."));
+  const content = `BT /F1 11 Tf 24 TL 72 613 Td ${SOURCE_LINES.map((line) => `(${line}) Tj`).join(" T* ")} ET`;
+  writeFileSync(
+    sourcePdf,
+    assemblePdf([
+      "<< /Type /Catalog /Pages 2 0 R >>",
+      "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+      "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+      "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+      `<< /Length ${content.length} >>\nstream\n${content}\nendstream`,
+    ]),
+  );
   const routes = new Map<string, { received: MockRequest[]; reply: Reply }>();
   const results: { name: string; status: string; elapsedMs: number; reason?: string }[] = [];
   let ordinal = 0;
@@ -514,6 +538,7 @@ export async function testit(): Promise<void> {
       saveSettings?: boolean;
       twoTabs?: boolean;
       roomy?: boolean;
+      fixture?: { pdf: string; zoom: string; selection: string };
       settings?: Record<string, string>;
     } = {},
   ): Promise<void> {
@@ -557,15 +582,16 @@ export async function testit(): Promise<void> {
     const margin = Math.round((work.right - work.left) * 0.08);
     const roomySize = `${work.right - work.left - 2 * margin}x${Math.floor((work.bottom - work.top) * 0.84)}`;
     const position = options.roomy ? ["-window-pos", `${roomySize}@${work.left + margin}x${work.top}`] : [];
+    const document = options.fixture?.pdf ?? (options.roomy ? roomyPdf : pdf);
     const session = await launchControlled(
       [
         "-appdata",
         appdata,
         "-zoom",
-        "200",
+        options.fixture?.zoom ?? "200",
         ...position,
         ...(options.twoTabs ? [secondPdf] : []),
-        options.roomy ? roomyPdf : pdf,
+        document,
       ],
       { saveSettings: options.saveSettings },
     );
@@ -575,7 +601,7 @@ export async function testit(): Promise<void> {
       sendMessage(findCanvas(session.frame), WM_HSCROLL, SB_TOP, 0);
       sendMessage(findCanvas(session.frame), WM_VSCROLL, SB_TOP, 0);
       await session.client.waitForRenderIdle();
-      await drag(session);
+      await drag(session, options.fixture?.selection);
       await check({ session, received, appdata, pdf });
       await quit(session);
       assert(arrowWindows(session).length === 0, "reader quit left an orphan arrow HWND");
@@ -765,6 +791,80 @@ export async function testit(): Promise<void> {
       },
       { roomy: true },
     );
+
+    const startTranslation = gate();
+    const finishTranslation = gate();
+    const firstChunk = "短译文。";
+    const translated = "\n" + firstChunk;
+    try {
+      await run(
+        "source-preview-placement",
+        async ({ session, received }) => {
+          const before = await waitState(session, (value) => value.visible && value.busy, "translation did not start");
+          const hwnd = popup(session);
+          const edit = translationBody(hwnd);
+          const copy = controlById(hwnd, COPY_BUTTON);
+          const initialRect = getWindowRect(hwnd);
+          assert(
+            getControlText(edit).replaceAll("\r\n", "\n") === SOURCE,
+            `waiting card did not show the selected text:\n${before.raw}`,
+          );
+          assert(!isWindowEnabled(copy), "waiting card enabled the copy-translation button for the source text");
+          assert(before.side !== "top", `first placement used the top slot despite the tall source:\n${before.raw}`);
+          checkCallout(session, before, "source-preview");
+
+          startTranslation.release();
+          const partial = await waitState(
+            session,
+            (value) => value.busy && value.text === translated,
+            "first translation chunk did not replace the source preview",
+          );
+          assert(
+            getControlText(edit).replaceAll("\r\n", "\n") === translated,
+            "translated text did not replace the native body",
+          );
+          assert(isWindowEnabled(copy), "copy stayed disabled after translation arrived");
+          // Wait through a streaming resize timer before releasing the terminal event.
+          await Bun.sleep(250);
+          assert(
+            partial.request === before.request && sameRect(initialRect, getWindowRect(hwnd)),
+            "short first chunk moved the waiting card",
+          );
+          finishTranslation.release();
+          const done = await expectText(session, translated);
+          assert(done.request === before.request && received.length === 1, "preview started an extra request");
+          assertSideRoom(session, done, "top");
+          assert(
+            done.side === "top" &&
+              getWindowRect(hwnd).bottom - getWindowRect(hwnd).top < initialRect.bottom - initialRect.top,
+            "completed short translation did not fit the preferred top slot",
+          );
+          checkCallout(session, done, "source-preview-translated");
+        },
+        {
+          roomy: true,
+          fixture: { pdf: sourcePdf, zoom: "100", selection: SOURCE },
+          settings: { TranslatePopupAutoSize: "true", TranslatePopupFontSize: "16", TranslatePopupPosition: "top" },
+          reply: () =>
+            new Response(
+              new ReadableStream({
+                async start(controller) {
+                  controller.enqueue(Buffer.from(delta("\n")));
+                  await startTranslation.promise;
+                  controller.enqueue(Buffer.from(delta(firstChunk)));
+                  await finishTranslation.promise;
+                  controller.enqueue(Buffer.from(delta("", "stop")));
+                  controller.close();
+                },
+              }),
+              { headers: { "Content-Type": "text/event-stream" } },
+            ),
+        },
+      );
+    } finally {
+      startTranslation.release();
+      finishTranslation.release();
+    }
 
     await run(
       "four-preferred-sides",

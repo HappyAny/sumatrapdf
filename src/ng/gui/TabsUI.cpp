@@ -682,7 +682,7 @@ static gpc::PopupMenu* MenuPopupFromModel(gp::Ctx* cx, MenuModel* model, Str id,
 // without tabs has no strip, so the caption asks for it alone. Null while the
 // menu bar is showing. A click opens the bar's menus as one drop-down.
 gp::El* TabsUIMenuButton(MainWindow* win, gp::Ctx* cx) {
-    if (win->isMenuBarVisible || AppShellNativeMenu() || !win->menu) {
+    if (win->isMenuBarVisible || !win->menu) {
         return nullptr;
     }
     gpc::PopupMenu* popup = MenuPopupFromModel(cx, win->menu, StrL("sumatra-menu-btn"), MenuCuesAlways());

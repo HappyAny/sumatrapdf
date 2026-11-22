@@ -5,8 +5,10 @@ import { join } from "node:path";
 import { ControlClient, ControlCommand } from "./control.ts";
 import { loadPng, makeTextPdf, pollUntil, runStandalone, tmpPath, writeAppdata } from "./util.ts";
 import { killAndWait, launchControlled } from "./win-automation.ts";
-import { controlById, TranslateControl } from "./translate-test-controls.ts";
+import { controlById, ParamControl, TranslateControl } from "./translate-test-controls.ts";
 import {
+  captureWindowDCRegionPixels,
+  captureWindowDCToPng,
   captureWindowToPng,
   clientToScreen,
   enumChildWindows,
@@ -14,9 +16,13 @@ import {
   getClientRect,
   getControlText,
   getFocusedHwnd,
+  getScrollInfo,
+  getWindowLong,
   getWindowRect,
   getWindowText,
+  GWL_STYLE,
   isWindowVisible,
+  packCoords,
   repaintWindow,
   sendMessage,
   sendText,
@@ -25,6 +31,14 @@ import {
 } from "./winapi.ts";
 
 const WM_KEYDOWN = 0x0100;
+const WM_NCHITTEST = 0x0084;
+const WM_VSCROLL = 0x0115;
+const WM_MOUSEWHEEL = 0x020a;
+const HTVSCROLL = 7n;
+const SB_THUMBPOSITION = 4;
+const SB_THUMBTRACK = 5;
+const SB_TOP = 6;
+const WS_VSCROLL = 0x00200000;
 const VK_RETURN = 0x0d;
 const VK_TAB = 0x09;
 const BM_CLICK = 0x00f5;
@@ -109,6 +123,85 @@ function inClient(parent: number, child: number): boolean {
   );
 }
 
+function checkScrollThumb(form: number, field: number, footer: number): number {
+  let pane = 0;
+  const width = getClientRect(form).right;
+  enumChildWindows(form, (child) => {
+    const rect = getWindowRect(child);
+    if (rect.right - rect.left === width && getWindowLong(child, GWL_STYLE) & WS_VSCROLL) pane = child;
+    return pane === 0;
+  });
+  assert(pane, "settings pane has no vertical scrollbar");
+  sendMessage(pane, WM_VSCROLL, SB_TOP, 0);
+  const rect = getWindowRect(pane);
+  const clientRight = clientToScreen(pane, getClientRect(pane).right, 0).x;
+  assert(rect.right > clientRight, "native scrollbar has no hit area");
+  const point = packCoords(Math.floor((clientRight + rect.right) / 2), Math.floor((rect.top + rect.bottom) / 2));
+  const hit = sendMessage(pane, WM_NCHITTEST, 0, point);
+  assert(hit === HTVSCROLL, `native vertical scrollbar does not handle mouse hits (hit=${hit})`);
+
+  const info = getScrollInfo(pane);
+  const maximum = info.max - info.page + 1;
+  assert(info.pos === 0 && maximum > 4 && maximum <= 0xffff, "settings fixture must start with a scrollable range");
+  const fieldTop = getWindowRect(field).top;
+  const footerTop = getWindowRect(footer).top;
+  const middle = Math.floor(maximum / 2);
+  const moves = [
+    [SB_THUMBTRACK, middle],
+    [SB_THUMBTRACK, maximum],
+    [SB_THUMBPOSITION, middle],
+  ] as const;
+  for (const [command, position] of moves) {
+    sendMessage(pane, WM_VSCROLL, (position << 16) | command, 0);
+    assert(getScrollInfo(pane).pos === position, `thumb did not move to ${position}`);
+    assert(getWindowRect(field).top === fieldTop - position, "settings content did not follow the thumb");
+    assert(getWindowRect(footer).top === footerTop, "the fixed footer moved with the scroll position");
+  }
+  sendMessage(pane, WM_MOUSEWHEEL, -120 << 16, 0);
+  const wheelPos = getScrollInfo(pane).pos;
+  assert(
+    wheelPos > middle && getWindowRect(field).top === fieldTop - wheelPos,
+    "wheel scrolling stopped after the drag",
+  );
+  return pane;
+}
+
+async function checkScrollPaint(form: number, pane: number, label: string): Promise<void> {
+  const info = getScrollInfo(pane);
+  const maximum = info.max - info.page + 1;
+  const origin = clientToScreen(pane, 0, 0);
+  const frame = getWindowRect(form);
+  const view = getClientRect(pane);
+  const snapshot = () =>
+    captureWindowDCRegionPixels(form, origin.x - frame.left, origin.y - frame.top, view.right, view.bottom);
+  // Try both directions, including portions of controls clipped by the viewport.
+  for (const fraction of [0.73, 0.36, 0.61, 0.22, 0.51, 0.47]) {
+    const position = Math.round(maximum * fraction);
+    sendMessage(pane, WM_VSCROLL, (position << 16) | SB_THUMBTRACK, 0);
+    await Bun.sleep(25);
+    const scrolled = snapshot();
+    assert(scrolled, `${label}: could not capture scrolled settings`);
+
+    repaintWindow(pane);
+    enumChildWindows(pane, (hwnd) => {
+      repaintWindow(hwnd);
+      return true;
+    });
+    await Bun.sleep(25);
+    const repainted = snapshot();
+    assert(repainted, `${label}: could not capture the repainted settings`);
+    let changed = 0;
+    let foreground = 0;
+    for (let i = 0; i < scrolled.length; i += 4) {
+      if (Math.abs(repainted[0]! - repainted[i]!) > 24) foreground++;
+      if (Math.abs(scrolled[i]! - repainted[i]!) > 24) changed++;
+    }
+    assert(foreground > 64, `${label}: the captured viewport has no visible controls`);
+    if (changed > 64) captureWindowDCToPng(form, tmpPath(`${label}-repainted.png`));
+    assert(changed <= 64, `${label}: ${changed} stale pixels after scrolling to ${position}`);
+  }
+}
+
 function assertButtonDrawn(parent: number, child: number, path: string): void {
   assert(isWindowVisible(child), "footer button is hidden");
   const image = loadPng(path);
@@ -130,7 +223,7 @@ function assertButtonDrawn(parent: number, child: number, path: string): void {
   assert(lightest - darkest >= minimumLabelContrast, `${getWindowText(child)} button label was not drawn`);
 }
 
-export async function testit(): Promise<void> {
+export async function testit(onlyCase = ""): Promise<void> {
   setProcessDpiAware();
   const pdf = tmpPath("translate-settings.pdf");
   writeFileSync(pdf, makeTextPdf("The quick brown fox reads a book."));
@@ -152,6 +245,7 @@ export async function testit(): Promise<void> {
     check: (session: Session, form: ConfigForm, endpoint: string, appdata: string) => Promise<void>,
     options: { saveSettings?: boolean } = {},
   ) {
+    if (onlyCase && name !== onlyCase) return;
     const path = `/${++ordinal}-${name}`;
     const dir = writeAppdata(
       `translate-settings-${ordinal}`,
@@ -256,6 +350,21 @@ export async function testit(): Promise<void> {
       );
       assertButtonDrawn(form.hwnd, form.save, screenshot);
       assertButtonDrawn(form.hwnd, form.cancel, screenshot);
+    });
+
+    await run("settings-scroll-thumb", async (session, form) => {
+      const pane = checkScrollThumb(form.hwnd, form.edits[0]!, form.save);
+      await checkScrollPaint(form.hwnd, pane, "settings");
+      sendMessage(controlById(form.hwnd, TranslateControl.custom), BM_CLICK, 0, 0);
+      const custom = await pollUntil(
+        () => findTopWindow(session.proc.pid!, "SumatraTranslateParams"),
+        (hwnd) => hwnd !== 0 && isWindowVisible(hwnd),
+        { timeoutMs: TIMEOUT, error: "custom parameters did not open" },
+      );
+      const add = controlById(custom, ParamControl.add);
+      for (let i = 0; i < 24; i++) sendMessage(add, BM_CLICK, 0, 0);
+      const rowsPane = checkScrollThumb(custom, add, controlById(custom, ParamControl.save));
+      await checkScrollPaint(custom, rowsPane, "custom-parameters");
     });
 
     await run("input-enter-saves", async (session, form, endpoint) => {

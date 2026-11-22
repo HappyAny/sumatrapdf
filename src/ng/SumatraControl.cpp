@@ -76,6 +76,7 @@
 #include "Notifications.h"
 #include "AIChatCommon.h"
 #include "EutlTrust.h"
+#include "SignatureUI.h"
 #include "PdfTools.h"
 #include "Tabs.h"
 #include "Toolbar.h"
@@ -113,6 +114,7 @@
 #include "ReadAloud.h"
 #include "ReadingAutoScroll.h"
 #include "ReadingBar.h"
+#include "MeasurementToolbar.h"
 #include "gui/OleDragDrop.h"
 #include "gui/NativeCursors.h"
 #include "SumatraControl.h"
@@ -654,6 +656,7 @@ enum class ControlCmd : u16 {
     // the first window's page and scroll position
     TestScrollState = 144,
     TestDrawRectSelection = 145,
+    TestSignatureStatus = 148,
     // the first window's tab widths, one "dx=<n> text=<title>" line per tab
     TestTabWidths = 149,
     // [url, dir]: Open from URL as the dialog's Download starts it
@@ -671,6 +674,7 @@ enum class ControlCmd : u16 {
     TestSelectedText = 157,
     // the bookmarks tree's visible rows and their heights
     TestTocRows = 158,
+    TestMeasurement = 159,
     // ng: not one of orig's; the performance snapshot cmd/port-perf.ts reads
     TestPerfStats = 161,
     // ng: not one of orig's; the state of the six canvas overlays
@@ -1046,7 +1050,8 @@ static TempStr SidebarLayoutResultTemp(int* exitCodeOut) {
     int bottomX = -1;
     int canvasX = win->canvasRc.x;
     if (topVis || bottomVis) {
-        int sideX = pref ? canvasX + win->canvasRc.dx + kSplitterDx : AppShellFrameBorder(win);
+        int splitDx = (int)((float)kSplitterDx * CanvasScale(win) + 0.5f);
+        int sideX = pref ? canvasX + win->canvasRc.dx + splitDx : AppShellFrameBorder(win);
         if (topVis) {
             topX = sideX;
         }
@@ -2608,10 +2613,11 @@ static void ExecuteControlRequest(ControlRequest* req) {
             Rect frame = win->frameRc;
             Rect canvas = win->canvasRc;
             bool captionHidden = win->tabsInTitlebar && !gSettings->showCaption && !win->captionOverlayShown;
-            int menuDy = (win->isMenuBarVisible && !AppShellNativeMenu() && !captionHidden) ? kMenuBarDy : 0;
+            int menuDy = (win->isMenuBarVisible && !captionHidden) ? kMenuBarDy : 0;
             int tabsDy = TabsAreVisible(win) ? kTabBarDy : 0;
             int toolbarDy = ToolbarDy(win);
-            int sidebarDx = (win->uiState.tocVisible || win->uiState.favVisible) ? win->sidebarDx : 0;
+            int sidebarDx =
+                (win->uiState.tocVisible || win->uiState.favVisible) ? (int)(AppShellSidebarWidthDip(win) + 0.5f) : 0;
             AppendLayoutRect(out, StrL("frame"), true, frame);
             AppendLayoutRect(out, StrL("canvas"), true, canvas);
             Rect menuRc{0, 0, frame.dx, menuDy};
@@ -2631,7 +2637,7 @@ static void ExecuteControlRequest(ControlRequest* req) {
             SidebarContent topContent = tab ? tab->sidebarContent : SidebarContent::Bookmarks;
             int sideX = border;
             if (sidebarDx > 0 && gSettings && gSettings->sidebarOnRight) {
-                sideX = canvas.x + canvas.dx + kSplitterDx;
+                sideX = canvas.x + canvas.dx + (int)((float)kSplitterDx * CanvasScale(win) + 0.5f);
             }
             Rect sideRc{sideX, topDy, sidebarDx, canvas.dy};
             // SidebarAutoHide: over the canvas edge, and only while shown
@@ -2678,6 +2684,17 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 }
             }
             AppendTestResult(req, 0, ToStrTemp(out));
+            break;
+        }
+
+        case ControlCmd::TestMeasurement: {
+            i32 pageNo = 0, x = 0, y = 0;
+            IntArg(req, 1, pageNo);
+            IntArg(req, 2, x);
+            IntArg(req, 3, y);
+            Str res = TestMeasurement(FirstWindow(), StringArg(req, 0), pageNo, PointF((float)x, (float)y),
+                                      StringArg(req, 1), StringArg(req, 2));
+            AppendTestResult(req, 0, res);
             break;
         }
 
@@ -3006,6 +3023,13 @@ static void ExecuteControlRequest(ControlRequest* req) {
                 break;
             }
             AppendTestResult(req, 0, AppShellUiStateTemp(FirstWindow()));
+            break;
+        }
+
+        case ControlCmd::TestSignatureStatus: {
+            MainWindow* win = FirstWindow();
+            AppendTestResult(req, win ? 0 : 2,
+                             win ? SignatureUiStateTemp(win, StringArg(req, 0)) : StrL("NOTREADY no-window"));
             break;
         }
 

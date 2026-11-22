@@ -545,6 +545,7 @@ import { testit as issue6448 } from "./issue-6448.ts";
 import { testit as issue6143 } from "./issue-6143.ts";
 import { testit as issue6144 } from "./issue-6144.ts";
 import { testit as toolbarTabSwitchPos } from "./toolbar-tab-switch-pos.ts";
+import { testit as toolbarPageLabels } from "./toolbar-page-labels.ts";
 import { testit as facingFitTinyViewport } from "./facing-fit-tiny-viewport.ts";
 import { testit as mdMissingFile } from "./ad-hoc-md-missing-file.ts";
 import { testit as issue6148 } from "./issue-6148.ts";
@@ -1058,6 +1059,7 @@ export const tests: NamedTest[] = [
   ["toc-selection-visible", tocSelectionVisible],
   ["issue-6132", issue6132],
   ["toolbar-tab-switch-pos", toolbarTabSwitchPos],
+  ["toolbar-page-labels", toolbarPageLabels],
   ["facing-fit-tiny-viewport", facingFitTinyViewport],
   ["issue-trim-margins", issueTrimMargins],
   ["trim-empty-margins-restore", trimEmptyMarginsRestore],

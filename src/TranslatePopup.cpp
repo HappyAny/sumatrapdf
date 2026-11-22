@@ -28,8 +28,11 @@
 #include "TranslateAnchor.h"
 #include "TranslatePopup.h"
 
+#include <richedit.h>
+
 constexpr WCHAR kPopupClass[] = L"SumatraTranslatePopup";
 constexpr WCHAR kConfigClass[] = L"SumatraTranslateConfig";
+constexpr WCHAR kScrollPaneClass[] = L"SumatraTranslateScrollPane";
 constexpr int kPopupWidth = 460;
 constexpr int kPopupHeight = 350;
 constexpr int kPopupMinWidth = 330;
@@ -37,6 +40,15 @@ constexpr int kPopupMinHeight = 180;
 constexpr int kPopupDefaultFontSize = 11;
 constexpr int kPopupMinFontSize = 8;
 constexpr int kPopupMaxFontSize = 32;
+constexpr int kDefaultLineSpacing = 100;
+constexpr int kMinLineSpacing = 1;
+constexpr int kMaxLineSpacing = 200;
+constexpr int kPercentPerSpacingUnit = 5;
+constexpr int kTwipsPerInch = 1440;
+constexpr BYTE kExactLineSpacing = 4;
+constexpr BYTE kRelativeLineSpacing = 5;
+constexpr UINT kUtf16CodePage = 1200;
+constexpr DWORD kRichEditPlainTextOnly = 0x20;
 constexpr int kPopupMaxWidth = 1600;
 constexpr int kPopupMaxHeight = 1200;
 constexpr UINT_PTR kPopupFitTimer = 2;
@@ -49,6 +61,9 @@ constexpr int kPopupButtonHeight = 28;
 constexpr int kPopupCardPaddingX = 8;
 constexpr int kPopupCardPaddingY = 4;
 constexpr int kPopupCardRadius = 8;
+constexpr int kPopupThumbWidth = 4;
+constexpr int kPopupScrollbarTimeout = 1200;
+constexpr UINT kDefaultWheelLines = 3;
 constexpr Color kPopupShellColor = RGB(242, 242, 242);
 constexpr Color kPopupCardColor = RGB(255, 255, 255);
 constexpr Color kPopupBorderColor = RGB(213, 213, 213);
@@ -56,7 +71,7 @@ constexpr Color kPopupTextColor = RGB(32, 32, 32);
 constexpr Color kPopupSecondaryColor = RGB(96, 96, 96);
 constexpr int kBodyLimit = 1024 * 1024;
 constexpr UINT_PTR kEscapeSubclass = 1;
-constexpr int kConfigContentHeight = 1410;
+constexpr int kConfigContentHeight = 1478;
 constexpr int kConfigScrollLine = 24;
 
 enum class PopupHide {
@@ -79,8 +94,12 @@ enum PopupButton {
 
 enum class PopupFit {
     Grow,
-    Exact,
-    Reset
+    Exact
+};
+
+enum class PopupBody {
+    Result,
+    Source
 };
 
 enum ConfigControlId {
@@ -102,7 +121,8 @@ enum ConfigControlId {
     ConfigHeight,
     ConfigMaxHeight,
     ConfigBold,
-    ConfigPosition
+    ConfigPosition,
+    ConfigLineSpacing
 };
 
 constexpr Str kThinkingValues[] = {StrL("default"), StrL("off"),  StrL("low"),
@@ -125,6 +145,11 @@ struct TranslatePopup {
     HWND title = nullptr;
     HWND status = nullptr;
     HWND resultEdit = nullptr;
+    bool richEdit = false;
+    int textHeight = 0;
+    int lineSpacing = kDefaultLineSpacing;
+    OverlayScrollbar* scrollbar = nullptr;
+    int wheelRemainder = 0;
     HWND buttons[5]{};
     HWND fontMinus = nullptr;
     HWND fontPlus = nullptr;
@@ -167,6 +192,7 @@ struct TranslatePopup {
     bool pinned = false;
     bool busy = false;
     bool error = false;
+    bool showingSource = false;
     PopupJob* job = nullptr;
 };
 
@@ -193,6 +219,7 @@ struct PopupConfig {
     Str customParams;
     HWND fontFace = nullptr;
     HWND fontSize = nullptr;
+    HWND lineSpacing = nullptr;
     HWND bold = nullptr;
     HWND autoSize = nullptr;
     HWND width = nullptr;
@@ -245,6 +272,11 @@ static void SetPopupFontSize(TranslatePopup* p, int value);
 static void SetPopupAutoSize(TranslatePopup* p, bool enabled);
 static void SetPopupBold(TranslatePopup* p, bool enabled);
 static int PopupLineHeight(TranslatePopup* p);
+static int PopupLineStep(TranslatePopup* p);
+static int PopupLineCount(TranslatePopup* p);
+static int FirstPopupLine(TranslatePopup* p);
+static void ScrollPopupToLine(TranslatePopup* p, int line);
+static void UpdatePopupScrollbar(TranslatePopup* p);
 
 struct PopupJob : LlmTranslateProgress {
     volatile LONG refs = 2;
@@ -309,6 +341,11 @@ static int PopupClamp(int value, int low, int high) {
     return std::max(low, std::min(value, high));
 }
 
+static int PopupLineSpacing() {
+    int percent = gSettings->translatePopupLineSpacing;
+    return percent < kMinLineSpacing ? kDefaultLineSpacing : std::min(percent, kMaxLineSpacing);
+}
+
 static Str PopupFontName(Str name) {
     str::TrimWsBoth(name);
     if (len(name) == 0 || str::ContainsChar(name, '\0') || str::ContainsChar(name, '\r') ||
@@ -332,18 +369,61 @@ static void SetPopupStatus(TranslatePopup* p, Str text) {
     HwndSetText(p->status, text);
 }
 
-static void SetPopupResult(TranslatePopup* p, Str text) {
-    str::ReplaceWithCopy(&p->result, text);
-    int firstLine = (int)SendMessageW(p->resultEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+static void ApplyPopupLineSpacing(TranslatePopup* p, int previous = kDefaultLineSpacing) {
+    if (!p->richEdit) return;
+    PARAFORMAT2 format{};
+    format.cbSize = sizeof(format);
+    format.dwMask = PFM_LINESPACING;
+    SendMessageW(p->resultEdit, EM_SETSEL, 0, -1);
+
+    int percent = p->lineSpacing;
+    if (percent >= kDefaultLineSpacing && percent % kPercentPerSpacingUnit == 0) {
+        format.bLineSpacingRule = kRelativeLineSpacing;
+        format.dyLineSpacing = percent / kPercentPerSpacingUnit;
+    } else {
+        // Relative spacing clamps at one line and only accepts 5% increments.
+        if (previous != kDefaultLineSpacing) SendMessageW(p->resultEdit, EM_SETPARAFORMAT, 0, (LPARAM)&format);
+        SendMessageW(p->resultEdit, EM_REQUESTRESIZE, 0, 0);
+        int lines = PopupLineCount(p);
+        int naturalHeight = p->textHeight > 0 ? p->textHeight : PopupLineHeight(p) * lines;
+        int singleHeight = MulDiv(naturalHeight, kTwipsPerInch, p->dpi);
+        format.bLineSpacingRule = kExactLineSpacing;
+        format.dyLineSpacing = std::max(MulDiv(1, kTwipsPerInch, p->dpi), MulDiv(singleHeight, percent, lines * 100));
+    }
+    SendMessageW(p->resultEdit, EM_SETPARAFORMAT, 0, (LPARAM)&format);
+}
+
+static void SetPopupBody(TranslatePopup* p, Str text, PopupBody body = PopupBody::Result) {
+    bool keepView = !p->showingSource && body == PopupBody::Result;
+    if (keepView && str::Eq(p->result, text)) {
+        QueuePopupFit(p);
+        return;
+    }
+    p->showingSource = body == PopupBody::Source;
+    str::ReplaceWithCopy(&p->result, p->showingSource ? Str{} : text);
+    int firstLine = 0;
     DWORD selStart = 0, selEnd = 0;
-    SendMessageW(p->resultEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+    if (keepView) {
+        firstLine = FirstPopupLine(p);
+        SendMessageW(p->resultEdit, EM_GETSEL, (WPARAM)&selStart, (LPARAM)&selEnd);
+    } else {
+        p->wheelRemainder = 0;
+    }
     TempStr normalized = str::ReplaceTemp(text, StrL("\r\n"), StrL("\n"));
-    HwndSetText(p->resultEdit, str::ReplaceTemp(normalized, StrL("\n"), StrL("\r\n")));
+    TempStr lines = str::ReplaceTemp(normalized, StrL("\n"), StrL("\r\n"));
+    if (p->richEdit) {
+        // PDF selections and model output are plain text, including strings beginning with "{\\rtf".
+        SETTEXTEX options{ST_UNICODE | kRichEditPlainTextOnly, kUtf16CodePage};
+        SendMessageW(p->resultEdit, EM_SETTEXTEX, (WPARAM)&options, (LPARAM)ToWStrTemp(lines).s);
+        if (p->lineSpacing != kDefaultLineSpacing) ApplyPopupLineSpacing(p);
+    } else {
+        HwndSetText(p->resultEdit, lines);
+    }
     SendMessageW(p->resultEdit, EM_SETSEL, selStart, selEnd);
-    int now = (int)SendMessageW(p->resultEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
-    SendMessageW(p->resultEdit, EM_LINESCROLL, 0, firstLine - now);
-    EnableWindow(p->buttons[0], !str::IsEmptyOrWhiteSpace(text));
+    if (firstLine != FirstPopupLine(p)) ScrollPopupToLine(p, firstLine);
+    EnableWindow(p->buttons[0], !str::IsEmptyOrWhiteSpace(p->result));
     QueuePopupFit(p);
+    UpdatePopupScrollbar(p);
 }
 
 static bool IsCurrentPopup(TranslatePopup* p) {
@@ -356,8 +436,12 @@ static void JobUpdate(PopupJob* job) {
     job->updateQueued = false;
     LeaveCriticalSection(&job->lock);
     TranslatePopup* p = FindPopupById(job->instance);
-    if (p && p->job == job && p->request == job->request && IsCurrentPopup(p) && !job->cancel.IsCanceled()) {
-        SetPopupResult(p, latest);
+    if (p && p->job == job && p->request == job->request && IsCurrentPopup(p) && !job->cancel.IsCanceled() &&
+        (!p->showingSource || !str::IsEmptyOrWhiteSpace(latest))) {
+        if (p->showingSource) {
+            SetPopupStatus(p, fmt("正在翻译为%s…", LlmLanguageLabel(job->input.langTo)));
+        }
+        SetPopupBody(p, latest);
     }
     str::Free(latest);
     ReleaseJob(job);
@@ -370,12 +454,12 @@ static void JobFinished(PopupJob* job) {
         p->busy = false;
         if (IsCurrentPopup(p) && !job->cancel.IsCanceled()) {
             if (job->ok) {
-                SetPopupResult(p, job->latest);
+                SetPopupBody(p, job->latest);
                 SetPopupStatus(p, fmt("%s · 翻译完成", LlmLanguageLabel(job->input.langTo)));
             } else {
                 p->error = true;
                 SetPopupStatus(p, StrL("翻译失败 · 可重试或修改设置"));
-                SetPopupResult(p, job->error);
+                SetPopupBody(p, job->error);
             }
         }
         ReleaseJob(job);
@@ -407,14 +491,20 @@ static void StartPopupJob(TranslatePopup* p) {
     if (!CanTranslate() || !CanCopySource(p->win)) {
         p->error = true;
         SetPopupStatus(p, StrL("划词翻译不可用"));
-        SetPopupResult(p, StrL("当前阅读器权限不允许使用翻译服务。"));
+        SetPopupBody(p, StrL("当前阅读器权限不允许使用翻译服务。"));
         return;
     }
     if (str::IsEmptyOrWhiteSpace(gSettings->translatePopupUrl) ||
         str::IsEmptyOrWhiteSpace(gSettings->translatePopupModel)) {
         SetPopupStatus(p, StrL("请先设置翻译服务"));
-        SetPopupResult(p, StrL("点击“设置”，填写 API 地址和模型，然后保存。\n\n支持 Chat Completions 和 Responses "
-                               "兼容接口，译文显示在这里。"));
+        SetPopupBody(p, StrL("点击“设置”，填写 API 地址和模型，然后保存。\n\n支持 Chat Completions 和 Responses "
+                             "兼容接口，译文显示在这里。"));
+        return;
+    }
+    if (len(p->source) > kLlmSourceLimit) {
+        p->error = true;
+        SetPopupStatus(p, StrL("翻译失败"));
+        SetPopupBody(p, StrL("选区过长，请分段翻译。"));
         return;
     }
     auto* job = new PopupJob();
@@ -433,16 +523,15 @@ static void StartPopupJob(TranslatePopup* p) {
     job->input.stream = gSettings->translatePopupStream;
     p->job = job;
     p->busy = true;
-    FitPopup(p, PopupFit::Reset);
-    SetPopupStatus(p, fmt("正在翻译为%s…", LlmLanguageLabel(job->input.langTo)));
-    SetPopupResult(p, {});
+    SetPopupStatus(p, fmt("原文 · 正在翻译为%s…", LlmLanguageLabel(job->input.langTo)));
+    SetPopupBody(p, p->source, PopupBody::Source);
     ThreadHandle thread = StartThread(MkFunc0(RunPopupJob, job), StrL("LlmTranslate"));
     if (!thread) {
         ReleaseJob(job);
         CancelPopupJob(p);
         p->error = true;
         SetPopupStatus(p, StrL("无法启动翻译"));
-        SetPopupResult(p, StrL("工作线程启动失败，请重试。"));
+        SetPopupBody(p, StrL("工作线程启动失败，请重试。"));
         return;
     }
     SafeCloseThreadHandle(&thread);
@@ -461,7 +550,7 @@ static void LayoutPopup(TranslatePopup* p) {
     int gapY = gap;
     if (p->textFont) {
         // Tighten vertical whitespace before clipping a line in a small manual window.
-        int minimumBody = PopupLineHeight(p) + 2 * ScalePopup(p, 1);
+        int minimumBody = PopupLineStep(p) + 2 * ScalePopup(p, 1);
         int whitespace = std::max(0, (int)rc.bottom - header - meta - buttonHeight - minimumBody);
         marginY = std::min(marginY, whitespace / 2);
         gapY = std::min(gapY, std::max(0, whitespace / 2 - marginY));
@@ -489,7 +578,7 @@ static void LayoutPopup(TranslatePopup* p) {
     int paddingX = std::min(ScalePopup(p, kPopupCardPaddingX), (p->card.dx - 1) / 2);
     int paddingY = std::min(ScalePopup(p, kPopupCardPaddingY), (p->card.dy - 1) / 2);
     if (p->textFont) {
-        int spare = std::max(0, p->card.dy - PopupLineHeight(p));
+        int spare = std::max(0, p->card.dy - PopupLineStep(p));
         paddingY = std::min(paddingY, spare / 2);
     }
     MoveWindow(p->resultEdit, p->card.x + paddingX, p->card.y + paddingY, p->card.dx - 2 * paddingX,
@@ -498,6 +587,7 @@ static void LayoutPopup(TranslatePopup* p) {
     for (int i = 0; i < 5; i++) {
         MoveWindow(p->buttons[i], margin + i * (buttonWidth + gap), footer, buttonWidth, buttonHeight, TRUE);
     }
+    UpdatePopupScrollbar(p);
     InvalidateRect(p->hwnd, nullptr, FALSE);
 }
 
@@ -634,7 +724,7 @@ static void PlacePopup(TranslatePopup* p) {
             int frame = std::max(0, current.dy - HwndClientRect(p->hwnd).dy);
             int chrome = frame + ScalePopup(p, kPopupHeaderHeight) + ScalePopup(p, kPopupStatusHeight) +
                          ScalePopup(p, kPopupButtonHeight);
-            minHeight = std::min(minHeight, chrome + PopupLineHeight(p) + 2 * ScalePopup(p, 1));
+            minHeight = std::min(minHeight, chrome + PopupLineStep(p) + 2 * ScalePopup(p, 1));
         }
         p->callout = PlaceTranslateCallout(p->anchor, placed.Size(), area, p->position, p->dpi, toolbar, minHeight);
         placed = p->callout.popup;
@@ -644,7 +734,10 @@ static void PlacePopup(TranslatePopup* p) {
     if (current != placed) {
         SetWindowPos(p->hwnd, nullptr, placed.x, placed.y, placed.dx, placed.dy, SWP_NOACTIVATE | SWP_NOZORDER);
     }
-    if (!IsWindowVisible(p->hwnd)) ShowWindow(p->hwnd, SW_SHOWNOACTIVATE);
+    if (!IsWindowVisible(p->hwnd)) {
+        ShowWindow(p->hwnd, SW_SHOWNOACTIVATE);
+        UpdatePopupScrollbar(p);
+    }
     if (!coversToolbar) AvoidSelectionToolbarCover(p->win, {});
     UpdatePopupArrow(p);
 }
@@ -661,6 +754,94 @@ static TEXTMETRICW PopupTextMetrics(TranslatePopup* p) {
 
 static int PopupLineHeight(TranslatePopup* p) {
     return std::max(1, (int)PopupTextMetrics(p).tmHeight);
+}
+
+static int PopupLineStep(TranslatePopup* p) {
+    return std::max(1, MulDiv(PopupLineHeight(p), p->lineSpacing, kDefaultLineSpacing));
+}
+
+static int FirstPopupLine(TranslatePopup* p) {
+    return (int)SendMessageW(p->resultEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+}
+
+static int PopupLineCount(TranslatePopup* p) {
+    return std::max(1, (int)SendMessageW(p->resultEdit, EM_GETLINECOUNT, 0, 0));
+}
+
+static int PopupLineY(TranslatePopup* p, int line) {
+    LRESULT start = SendMessageW(p->resultEdit, EM_LINEINDEX, line, 0);
+    POINTL point{};
+    SendMessageW(p->resultEdit, EM_POSFROMCHAR, (WPARAM)&point, start);
+    return point.y;
+}
+
+static int PopupContentHeight(TranslatePopup* p) {
+    if (p->richEdit && p->textHeight > 0) return p->textHeight;
+    return PopupLineCount(p) * PopupLineStep(p);
+}
+
+static RECT PopupTextRect(TranslatePopup* p) {
+    RECT rect{};
+    SendMessageW(p->resultEdit, EM_GETRECT, 0, (LPARAM)&rect);
+    return rect;
+}
+
+static int PopupPageLines(TranslatePopup* p) {
+    return std::max(1, RectDy(PopupTextRect(p)) / PopupLineStep(p));
+}
+
+static void ScrollPopupTo(TranslatePopup* p, int value) {
+    if (!p->richEdit) {
+        SendMessageW(p->resultEdit, EM_LINESCROLL, 0, value - FirstPopupLine(p));
+        return;
+    }
+    int maximum = std::max(0, PopupContentHeight(p) - HwndClientRect(p->resultEdit).dy);
+    POINT position{0, std::clamp(value, 0, maximum)};
+    SendMessageW(p->resultEdit, EM_SETSCROLLPOS, 0, (LPARAM)&position);
+}
+
+static void ScrollPopupToLine(TranslatePopup* p, int line) {
+    if (p->richEdit) {
+        // Line positions have no 16-bit limit, including for long streamed replies.
+        int target = std::clamp(line, 0, PopupLineCount(p) - 1);
+        ScrollPopupTo(p, PopupLineY(p, target) - PopupLineY(p, 0));
+    } else {
+        ScrollPopupTo(p, line);
+    }
+}
+
+static void UpdatePopupScrollbar(TranslatePopup* p) {
+    OverlayScrollbar* scrollbar = p->scrollbar;
+    if (!scrollbar) return;
+    if (!p->open || !IsWindowVisible(p->hwnd)) {
+        OverlayScrollbarShow(scrollbar, false);
+        return;
+    }
+
+    int page = p->richEdit ? std::max(1, HwndClientRect(p->resultEdit).dy) : PopupPageLines(p);
+    int extent = p->richEdit ? PopupContentHeight(p) : PopupLineCount(p);
+    OverlayScrollbarShow(scrollbar, extent > page);
+    if (extent <= page) return;
+
+    SCROLLINFO info{sizeof(info), SIF_RANGE | SIF_PAGE | SIF_POS};
+    info.nMax = extent - 1;
+    info.nPage = (UINT)page;
+    info.nPos = p->richEdit ? std::max(0L, PopupTextRect(p).top - PopupLineY(p, 0)) : FirstPopupLine(p);
+    scrollbar->thinWidth = ScalePopup(p, kPopupThumbWidth);
+    OverlayScrollbarUpdatePos(scrollbar);
+    OverlayScrollbarSetInfo(scrollbar, &info, IsOverlayScrollbarVisible(scrollbar));
+}
+
+static void ScrollPopupWheel(TranslatePopup* p, int delta) {
+    UINT wheelLines = kDefaultWheelLines;
+    SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &wheelLines, 0);
+    UINT lines = std::min(wheelLines, (UINT)PopupPageLines(p));
+    i64 units = (i64)delta * lines + p->wheelRemainder;
+    p->wheelRemainder = (int)(units % WHEEL_DELTA);
+    int scroll = -(int)(units / WHEEL_DELTA);
+    if (scroll) ScrollPopupToLine(p, FirstPopupLine(p) + scroll);
+    UpdatePopupScrollbar(p);
+    OverlayScrollbarNotifyScroll(p->scrollbar);
 }
 
 static void CancelPopupFit(TranslatePopup* p) {
@@ -681,20 +862,19 @@ static void FitPopup(TranslatePopup* p, PopupFit how) {
     int width = std::min(ScalePopup(p, p->preferredWidth), work.dx);
     int height = std::min(ScalePopup(p, p->preferredHeight), work.dy);
     if (p->autoSize) {
-        // Establish the wrap width before asking EDIT for its actual line count.
+        // Establish the wrap width without showing the popup at an unmeasured height.
         if (width != before.dx) {
-            p->fittedSize = {width, std::min(before.dy, work.dy)};
-            PlacePopup(p);
+            SetWindowPos(p->hwnd, nullptr, 0, 0, width, std::min(before.dy, work.dy),
+                         SWP_NOMOVE | SWP_NOACTIVATE | SWP_NOZORDER);
         }
         Rect current = HwndWindowRect(p->hwnd);
         Rect body = HwndClientRect(p->resultEdit);
         int chrome = current.dy - body.dy;
-        int lines = (int)SendMessageW(p->resultEdit, EM_GETLINECOUNT, 0, 0);
-        i64 needed = (i64)std::max(1, lines) * PopupLineHeight(p) + chrome + ScalePopup(p, 8);
+        i64 needed = (i64)PopupContentHeight(p) + chrome + ScalePopup(p, 8);
         int minimum = std::min(ScalePopup(p, kPopupMinHeight), work.dy);
         int maximum = std::min(work.dy, std::max(minimum, MulDiv(work.dy, p->maxHeight, 100)));
-        height = how == PopupFit::Reset ? minimum : (int)std::min<i64>(maximum, std::max<i64>(minimum, needed));
-        if (how == PopupFit::Grow) height = std::min(maximum, std::max(height, before.dy));
+        height = (int)std::clamp<i64>(needed, minimum, maximum);
+        if (how == PopupFit::Grow) height = std::min(maximum, std::max({height, before.dy, p->fittedSize.dy}));
     }
     p->fittedSize = {width, height};
     PlacePopup(p);
@@ -703,12 +883,13 @@ static void FitPopup(TranslatePopup* p, PopupFit how) {
 }
 
 static void QueuePopupFit(TranslatePopup* p) {
-    if (!p->autoSize || p->sizing || !p->hwnd || !IsWindowVisible(p->hwnd)) return;
-    if (!p->busy) {
+    if (!p->hwnd || p->sizing) return;
+    if (!p->busy || p->showingSource) {
         CancelPopupFit(p);
         FitPopup(p, PopupFit::Exact);
         return;
     }
+    if (!p->autoSize || !IsWindowVisible(p->hwnd)) return;
     if (!p->fitPending) {
         p->fitPending = SetTimer(p->hwnd, kPopupFitTimer, kPopupFitInterval, nullptr) != 0;
     }
@@ -717,6 +898,7 @@ static void QueuePopupFit(TranslatePopup* p) {
 static void UpdateAppearance(TranslatePopup* p) {
     Str name = PopupFontName(gSettings->translatePopupFont);
     int points = PopupClamp(gSettings->translatePopupFontSize, kPopupMinFontSize, kPopupMaxFontSize);
+    int spacing = p->richEdit ? PopupLineSpacing() : kDefaultLineSpacing;
     int width = PopupClamp(gSettings->translatePopupWidth, kPopupMinWidth, kPopupMaxWidth);
     int height = PopupClamp(gSettings->translatePopupHeight, kPopupMinHeight, kPopupMaxHeight);
     int maximum = PopupClamp(gSettings->translatePopupMaxHeight, 30, 90);
@@ -727,34 +909,40 @@ static void UpdateAppearance(TranslatePopup* p) {
     bool sizeChanged = p->autoSize != gSettings->translatePopupAutoSize || p->preferredWidth != width ||
                        p->preferredHeight != height || p->maxHeight != maximum;
     bool positionChanged = p->position != position;
+    int previousSpacing = p->lineSpacing;
+    bool spacingChanged = previousSpacing != spacing;
     p->autoSize = gSettings->translatePopupAutoSize;
     p->preferredWidth = width;
     p->preferredHeight = height;
     p->maxHeight = maximum;
     p->position = position;
-    if (fontChanged) {
-        int firstLine = (int)SendMessageW(p->resultEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
+    p->lineSpacing = spacing;
+    if (fontChanged || spacingChanged) {
+        int firstLine = FirstPopupLine(p);
         DWORD start = 0, end = 0;
         SendMessageW(p->resultEdit, EM_GETSEL, (WPARAM)&start, (LPARAM)&end);
-        HFONT old = p->textFont;
-        p->textFont = NewPopupFont(p->dpi, points, bold ? FW_BOLD : FW_NORMAL, name);
-        p->fontSize = points;
-        p->fontDpi = p->dpi;
-        p->bold = bold;
-        str::ReplaceWithCopy(&p->fontFace, name);
-        HwndSetFont(p->resultEdit, p->textFont);
-        DeleteObject(old);
+        if (fontChanged) {
+            HFONT old = p->textFont;
+            p->textFont = NewPopupFont(p->dpi, points, bold ? FW_BOLD : FW_NORMAL, name);
+            p->fontSize = points;
+            p->fontDpi = p->dpi;
+            p->bold = bold;
+            str::ReplaceWithCopy(&p->fontFace, name);
+            HwndSetFont(p->resultEdit, p->textFont);
+            SendMessageW(p->resultEdit, EM_SETMARGINS, EC_RIGHTMARGIN, MAKELPARAM(0, ScalePopup(p, kPopupThumbWidth)));
+            DeleteObject(old);
+        }
+        if (spacingChanged || spacing != kDefaultLineSpacing) ApplyPopupLineSpacing(p, previousSpacing);
         LayoutPopup(p);
         SendMessageW(p->resultEdit, EM_SETSEL, start, end);
-        int now = (int)SendMessageW(p->resultEdit, EM_GETFIRSTVISIBLELINE, 0, 0);
-        SendMessageW(p->resultEdit, EM_LINESCROLL, 0, firstLine - now);
+        if (firstLine != FirstPopupLine(p)) ScrollPopupToLine(p, firstLine);
     }
     HwndSetText(p->fontSizeText, fmt("%dpt", points));
     EnableWindow(p->fontMinus, points > kPopupMinFontSize);
     EnableWindow(p->fontPlus, points < kPopupMaxFontSize);
     SendMessageW(p->autoSizeButton, BM_SETCHECK, p->autoSize ? BST_CHECKED : BST_UNCHECKED, 0);
     SendMessageW(p->boldButton, BM_SETCHECK, p->bold ? BST_CHECKED : BST_UNCHECKED, 0);
-    if (fontChanged || sizeChanged) {
+    if (fontChanged || sizeChanged || spacingChanged) {
         CancelPopupFit(p);
         FitPopup(p, PopupFit::Exact);
     }
@@ -828,9 +1016,20 @@ static void HidePopup(TranslatePopup* p, PopupHide how) {
 
 static LRESULT CALLBACK EscapeChildProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data) {
     TranslatePopup* p = FindPopupById((u64)data);
-    if (p && hwnd == p->resultEdit && msg == WM_MOUSEWHEEL && (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL)) {
-        int steps = GET_WHEEL_DELTA_WPARAM(wp) / WHEEL_DELTA;
-        if (steps) SetPopupFontSize(p, p->fontSize + steps);
+    bool edit = p && hwnd == p->resultEdit;
+    if (edit && msg == WM_MOUSEWHEEL) {
+        int delta = GET_WHEEL_DELTA_WPARAM(wp);
+        if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL) {
+            int steps = delta / WHEEL_DELTA;
+            if (steps) SetPopupFontSize(p, p->fontSize + steps);
+        } else {
+            ScrollPopupWheel(p, delta);
+        }
+        return 0;
+    }
+    if (edit && p->scrollbar && msg == WM_VSCROLL && (LOWORD(wp) == SB_THUMBTRACK || LOWORD(wp) == SB_THUMBPOSITION)) {
+        ScrollPopupTo(p, p->scrollbar->nTrackPos);
+        UpdatePopupScrollbar(p);
         return 0;
     }
     if (msg == WM_KEYDOWN) {
@@ -846,7 +1045,17 @@ static LRESULT CALLBACK EscapeChildProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         return 0;
     }
     if (msg == WM_NCDESTROY) RemoveWindowSubclass(hwnd, EscapeChildProc, id);
-    return DefSubclassProc(hwnd, msg, wp, lp);
+    LRESULT result = DefSubclassProc(hwnd, msg, wp, lp);
+    if (edit && p->scrollbar) {
+        if (msg == WM_MOUSEMOVE) OverlayScrollbarNotifyScroll(p->scrollbar);
+        if (msg == WM_VSCROLL || msg == WM_KEYDOWN || msg == EM_LINESCROLL ||
+            (msg == WM_MOUSEMOVE && (wp & MK_LBUTTON))) {
+            int before = p->scrollbar->nPos;
+            UpdatePopupScrollbar(p);
+            if (before != p->scrollbar->nPos) OverlayScrollbarNotifyScroll(p->scrollbar);
+        }
+    }
+    return result;
 }
 
 static HWND NewPopupControl(HWND parent, const WCHAR* cls, const WCHAR* text, DWORD style, int id = 0) {
@@ -866,8 +1075,23 @@ static void CreatePopupControls(TranslatePopup* p) {
         SetWindowSubclass(control, EscapeChildProc, kEscapeSubclass, (DWORD_PTR)p->instance);
     }
     p->status = NewPopupControl(p->hwnd, L"STATIC", L"划词翻译", SS_LEFT);
-    p->resultEdit = NewPopupControl(p->hwnd, L"EDIT", L"", ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL);
-    SendMessageW(p->resultEdit, EM_SETLIMITTEXT, kBodyLimit, 0);
+    static HMODULE richEditDll = LoadLibraryExW(L"Msftedit.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    constexpr DWORD textStyle = ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL;
+    if (richEditDll) {
+        p->resultEdit = NewPopupControl(p->hwnd, MSFTEDIT_CLASS, L"", textStyle | ES_NOOLEDRAGDROP);
+    }
+    p->richEdit = p->resultEdit != nullptr;
+    if (p->richEdit) {
+        SendMessageW(p->resultEdit, EM_SETBKGNDCOLOR, FALSE, kPopupCardColor);
+        SendMessageW(p->resultEdit, EM_EXLIMITTEXT, 0, kBodyLimit);
+        SendMessageW(p->resultEdit, EM_SETUNDOLIMIT, 0, 0);
+        SendMessageW(p->resultEdit, EM_SETEVENTMASK, 0, ENM_REQUESTRESIZE);
+    } else {
+        p->resultEdit = NewPopupControl(p->hwnd, L"EDIT", L"", textStyle);
+        SendMessageW(p->resultEdit, EM_SETLIMITTEXT, kBodyLimit, 0);
+    }
+    p->scrollbar = OverlayScrollbarCreate(p->resultEdit, OverlayScrollbar::Type::Vert, OverlayScrollbar::Mode::Thin);
+    if (p->scrollbar) p->scrollbar->showAfterScrollMs = kPopupScrollbarTimeout;
     const WCHAR* labels[] = {L"复制", L"重试", L"固定", L"设置", L"关闭"};
     for (int i = 0; i < 5; i++) {
         p->buttons[i] = NewPopupControl(p->hwnd, L"BUTTON", labels[i], WS_TABSTOP | BS_PUSHBUTTON, ButtonCopy + i);
@@ -883,7 +1107,8 @@ static bool RunPopupAction(TranslatePopup* p, int action) {
     if (action == ButtonClose) {
         HidePopup(p, PopupHide::Force);
     } else if (action == ButtonCopy) {
-        if (HasPermission(Perm::CopySelection) && CopyTextToClipboard(p->result)) {
+        if (!str::IsEmptyOrWhiteSpace(p->result) && HasPermission(Perm::CopySelection) &&
+            CopyTextToClipboard(p->result)) {
             SetPopupStatus(p, StrL("译文已复制"));
         }
     } else if (action == ButtonRetry) {
@@ -920,15 +1145,24 @@ static LRESULT CALLBACK PopupWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             return 0;
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
+        case WM_MOUSEWHEEL: {
+            Point point = HwndScreenToClient(hwnd, {GET_X_LPARAM(lp), GET_Y_LPARAM(lp)});
+            if (p->card.Contains(point)) return SendMessageW(p->resultEdit, msg, wp, lp);
+            break;
+        }
         case WM_SIZE:
             LayoutPopup(p);
             UpdatePopupArrow(p);
             return 0;
         case WM_MOVE:
+            OverlayScrollbarUpdatePos(p->scrollbar);
             UpdatePopupArrow(p);
             return 0;
         case WM_SHOWWINDOW:
-            if (!wp) HideTranslateArrow(p->arrow);
+            if (!wp) {
+                OverlayScrollbarShow(p->scrollbar, false);
+                HideTranslateArrow(p->arrow);
+            }
             return 0;
         case WM_GETMINMAXINFO: {
             auto* limits = (MINMAXINFO*)lp;
@@ -987,6 +1221,14 @@ static LRESULT CALLBACK PopupWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
             SetBkColor((HDC)wp, body ? kPopupCardColor : kPopupShellColor);
             return (LRESULT)(body ? p->bodyBrush : p->brush);
         }
+        case WM_NOTIFY: {
+            const auto* note = (const NMHDR*)lp;
+            if (note->hwndFrom == p->resultEdit && note->code == EN_REQUESTRESIZE) {
+                p->textHeight = RectDy(((const REQRESIZE*)note)->rc);
+                return 0;
+            }
+            break;
+        }
         case WM_ERASEBKGND:
             PaintPopup(p, (HDC)wp);
             return 1;
@@ -1022,10 +1264,9 @@ static LRESULT CALLBACK PopupWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) 
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-static void RegisterPopupClass(const WCHAR* name, WNDPROC proc, UINT style) {
+static void RegisterPopupClass(const WCHAR* name, WNDPROC proc) {
     WNDCLASSEXW cls{};
     cls.cbSize = sizeof(cls);
-    cls.style = style;
     cls.lpfnWndProc = proc;
     cls.hInstance = GetModuleHandleW(nullptr);
     cls.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -1033,16 +1274,32 @@ static void RegisterPopupClass(const WCHAR* name, WNDPROC proc, UINT style) {
     RegisterClassExW(&cls);
 }
 
-static TranslatePopup* NewPopup(MainWindow* win) {
-    RegisterPopupClass(kPopupClass, PopupWndProc, CS_DROPSHADOW);
+HWND NewTranslateScrollPane(HWND parent) {
+    // Let the default window procedure handle the native non-client scrollbar.
+    RegisterPopupClass(kScrollPaneClass, DefWindowProcW);
+    return CreateWindowExW(WS_EX_CONTROLPARENT, kScrollPaneClass, L"",
+                           WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_VSCROLL, 0, 0, 0, 0, parent, nullptr,
+                           GetModuleHandleW(nullptr), nullptr);
+}
+
+void RepaintTranslateScrollPane(HWND pane) {
+    if (!IsWindowVisible(pane)) return;
+    // Repaint exposed gaps and child controls after all their positions have changed.
+    RedrawWindow(pane, nullptr, nullptr, RDW_INVALIDATE | RDW_ERASE | RDW_FRAME | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
+static TranslatePopup* NewPopup(MainWindow* win, Rect anchor) {
+    // The native resize frame already supplies a shadow.
+    RegisterPopupClass(kPopupClass, PopupWndProc);
     auto* p = new TranslatePopup();
     p->win = win;
     p->instance = ++gPopupInstance;
-    p->dpi = DpiGetForHwnd(win->hwndFrame);
+    p->dpi = DpiGetForPoint(anchor.x, anchor.y);
     VecAppend(gPopups, p);
-    HWND hwnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kPopupClass, L"划词翻译",
-                                WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN, 0, 0, ScalePopup(p, kPopupWidth),
-                                ScalePopup(p, kPopupHeight), win->hwndFrame, nullptr, GetModuleHandleW(nullptr), p);
+    HWND hwnd =
+        CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, kPopupClass, L"划词翻译",
+                        WS_POPUP | WS_THICKFRAME | WS_CLIPCHILDREN, anchor.x, anchor.y, ScalePopup(p, kPopupWidth),
+                        ScalePopup(p, kPopupHeight), win->hwndFrame, nullptr, GetModuleHandleW(nullptr), p);
     if (!hwnd) {
         DeleteTranslatePopup(win);
         return nullptr;
@@ -1089,15 +1346,26 @@ static TranslatePosition ConfigPositionValue(PopupConfig* c) {
     return index >= 0 && index < dimofi(kPositionValues) ? kPositionValues[index] : TranslatePosition::Auto;
 }
 
-static bool ConfigIntValue(HWND child, int low, int high, int& value) {
+static bool ConfigIntValue(HWND child, int low, int high, int& value, Str suffix = {}) {
     Str text = HwndGetTextTemp(child);
     str::TrimWsBoth(text);
+    if (len(suffix) && str::EndsWith(text, suffix)) {
+        text.len -= len(suffix);
+        str::TrimWsBoth(text);
+    }
+    if (len(text) == 0) return false;
     char* end = nullptr;
     char* start = CStrTemp(text);
     long parsed = strtol(start, &end, 10);
-    if (len(text) == 0 || end != start + len(text) || parsed < low || parsed > high) return false;
+    if (end != start + len(text) || parsed < low || parsed > high) return false;
     value = (int)parsed;
     return true;
+}
+
+static int ConfigLineSpacingValue(PopupConfig* c) {
+    int value = 0;
+    ConfigIntValue(c->lineSpacing, kMinLineSpacing, kMaxLineSpacing, value, StrL("%"));
+    return value;
 }
 
 static Str EffectivePopupPrompt(Str text) {
@@ -1137,6 +1405,7 @@ static bool ConfigAppearanceChanged(PopupConfig* c) {
     str::TrimWsBoth(face);
     return !str::Eq(face, PopupFontName(gSettings->translatePopupFont)) ||
            points != PopupClamp(gSettings->translatePopupFontSize, kPopupMinFontSize, kPopupMaxFontSize) ||
+           ConfigLineSpacingValue(c) != PopupLineSpacing() ||
            width != PopupClamp(gSettings->translatePopupWidth, kPopupMinWidth, kPopupMaxWidth) ||
            height != PopupClamp(gSettings->translatePopupHeight, kPopupMinHeight, kPopupMaxHeight) ||
            maximum != PopupClamp(gSettings->translatePopupMaxHeight, 30, 90) ||
@@ -1154,6 +1423,7 @@ static bool ConfigAppearanceValid(PopupConfig* c) {
     int value;
     if (!ConfigIntValue(c->fontSize, kPopupMinFontSize, kPopupMaxFontSize, value))
         return ConfigError(c, StrL("译文字号须为 8 到 32 之间的整数。"));
+    if (!ConfigLineSpacingValue(c)) return ConfigError(c, StrL("文字行距须为 1% 到 200% 之间的整数百分比。"));
     if (!ConfigIntValue(c->width, kPopupMinWidth, kPopupMaxWidth, value))
         return ConfigError(c, StrL("阅读宽度须为 330 到 1600 之间的整数。"));
     if (!ConfigIntValue(c->height, kPopupMinHeight, kPopupMaxHeight, value))
@@ -1168,6 +1438,7 @@ static void SaveConfigAppearance(PopupConfig* c) {
     str::TrimWsBoth(face);
     str::ReplaceWithCopy(&gSettings->translatePopupFont, face);
     ConfigIntValue(c->fontSize, kPopupMinFontSize, kPopupMaxFontSize, gSettings->translatePopupFontSize);
+    gSettings->translatePopupLineSpacing = ConfigLineSpacingValue(c);
     ConfigIntValue(c->width, kPopupMinWidth, kPopupMaxWidth, gSettings->translatePopupWidth);
     ConfigIntValue(c->height, kPopupMinHeight, kPopupMaxHeight, gSettings->translatePopupHeight);
     ConfigIntValue(c->maxHeight, 30, 90, gSettings->translatePopupMaxHeight);
@@ -1369,6 +1640,7 @@ static void LayoutConfig(PopupConfig* c) {
     info.nPage = (UINT)viewHeight;
     info.nPos = c->scroll;
     SetScrollInfo(c->content, SB_VERT, &info, TRUE);
+    DeferWinPosHelper positions;
     for (ConfigItem& item : c->items) {
         Rect r = item.rect;
         int x = DpiScaleByDpi(dpi, r.x);
@@ -1389,8 +1661,14 @@ static void LayoutConfig(PopupConfig* c) {
         }
         if (item.id == ButtonSave) x = client.right - margin - width;
         if (item.id == ButtonCancel) x = client.right - margin - 2 * width - DpiScaleByDpi(dpi, 12);
-        MoveWindow(item.hwnd, x, y, width, DpiScaleByDpi(dpi, r.dy), TRUE);
+        int height = DpiScaleByDpi(dpi, r.dy);
+        if (footer)
+            MoveWindow(item.hwnd, x, y, width, height, TRUE);
+        else
+            positions.MoveWindowNoCopyBits(item.hwnd, Rect(x, y, width, height));
     }
+    positions.End();
+    RepaintTranslateScrollPane(c->content);
 }
 
 static void RevealConfigControl(PopupConfig* c, HWND child) {
@@ -1407,11 +1685,11 @@ static void RevealConfigControl(PopupConfig* c, HWND child) {
     LayoutConfig(c);
 }
 
-static void ScrollConfig(PopupConfig* c, UINT command) {
+static void ScrollConfig(PopupConfig* c, WPARAM request) {
     SCROLLINFO info{sizeof(info), SIF_ALL};
     GetScrollInfo(c->content, SB_VERT, &info);
     int step = DpiScaleByDpi(DpiGetForHwnd(c->hwnd), kConfigScrollLine);
-    switch (command) {
+    switch (LOWORD(request)) {
         case SB_LINEUP:
             c->scroll -= step;
             break;
@@ -1432,7 +1710,7 @@ static void ScrollConfig(PopupConfig* c, UINT command) {
             break;
         case SB_THUMBPOSITION:
         case SB_THUMBTRACK:
-            c->scroll = info.nTrackPos;
+            c->scroll = info.nMax <= UINT16_MAX ? HIWORD(request) : info.nTrackPos;
             break;
         default:
             return;
@@ -1512,8 +1790,7 @@ static void CreateConfigControls(PopupConfig* c) {
     c->font = NewPopupFont(c->dpi, 10, FW_NORMAL);
     c->brush = CreateSolidBrush(ThemeWindowBackgroundColor());
     c->background = ThemeWindowBackgroundColor();
-    c->content = NewPopupControl(c->hwnd, L"STATIC", L"", WS_CLIPCHILDREN | WS_VSCROLL);
-    SetWindowLongPtrW(c->content, GWL_EXSTYLE, GetWindowLongPtrW(c->content, GWL_EXSTYLE) | WS_EX_CONTROLPARENT);
+    c->content = NewTranslateScrollPane(c->hwnd);
     SetWindowSubclass(c->content, ConfigContentProc, kEscapeSubclass, (DWORD_PTR)c->hwnd);
     ConfigControl(c, L"STATIC", L"API 地址（完整 Chat Completions 或 Responses 端点）", SS_LEFT, 18, 17, 570, 24);
     c->url = ConfigControl(c, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 18, 44, 570, 28, ConfigUrl);
@@ -1555,23 +1832,26 @@ static void CreateConfigControls(PopupConfig* c) {
     ConfigControl(c, L"STATIC", L"译文字号（8–32 pt）", SS_LEFT, 18, 922, 570, 24);
     c->fontSize =
         ConfigControl(c, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 18, 949, 570, 28, ConfigFontSize);
-    c->bold = ConfigControl(c, L"BUTTON", L"译文加粗", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 991, 570, 26, ConfigBold);
-    c->autoSize = ConfigControl(c, L"BUTTON", L"按译文自适应高度", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 1031, 570, 26,
+    ConfigControl(c, L"STATIC", L"文字行距（1–200%，100% 为单倍）", SS_LEFT, 18, 989, 570, 24);
+    c->lineSpacing =
+        ConfigControl(c, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 18, 1016, 570, 28, ConfigLineSpacing);
+    c->bold = ConfigControl(c, L"BUTTON", L"译文加粗", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 1059, 570, 26, ConfigBold);
+    c->autoSize = ConfigControl(c, L"BUTTON", L"按译文自适应高度", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 1099, 570, 26,
                                 ConfigAutoSize);
-    ConfigControl(c, L"STATIC", L"阅读宽度 / 手动宽度（330–1600）", SS_LEFT, 18, 1071, 570, 24);
-    c->width = ConfigControl(c, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 18, 1098, 570, 28, ConfigWidth);
-    ConfigControl(c, L"STATIC", L"手动高度（180–1200，仅手动模式）", SS_LEFT, 18, 1138, 570, 24);
+    ConfigControl(c, L"STATIC", L"阅读宽度 / 手动宽度（330–1600）", SS_LEFT, 18, 1139, 570, 24);
+    c->width = ConfigControl(c, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 18, 1166, 570, 28, ConfigWidth);
+    ConfigControl(c, L"STATIC", L"手动高度（180–1200，仅手动模式）", SS_LEFT, 18, 1206, 570, 24);
     c->height =
-        ConfigControl(c, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 18, 1165, 570, 28, ConfigHeight);
-    ConfigControl(c, L"STATIC", L"自动最大高度（占阅读区高度的 30–90%）", SS_LEFT, 18, 1205, 570, 24);
+        ConfigControl(c, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 18, 1233, 570, 28, ConfigHeight);
+    ConfigControl(c, L"STATIC", L"自动最大高度（占阅读区高度的 30–90%）", SS_LEFT, 18, 1273, 570, 24);
     c->maxHeight =
-        ConfigControl(c, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 18, 1232, 570, 28, ConfigMaxHeight);
-    ConfigControl(c, L"STATIC", L"浮窗位置（空间不足自动换边）", SS_LEFT, 18, 1272, 570, 24);
-    c->position = ConfigControl(c, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 18, 1299, 570, 220,
+        ConfigControl(c, L"EDIT", L"", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL, 18, 1300, 570, 28, ConfigMaxHeight);
+    ConfigControl(c, L"STATIC", L"浮窗位置（空间不足自动换边）", SS_LEFT, 18, 1340, 570, 24);
+    c->position = ConfigControl(c, L"COMBOBOX", L"", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL, 18, 1367, 570, 220,
                                 ConfigPosition);
     c->note = ConfigControl(
         c, L"STATIC", L"宽高以100%缩放为基准，随系统缩放变化。拖动边框后锁定尺寸，点击“自适应”恢复。密钥保存在本机。",
-        SS_LEFT, 18, 1340, 570, 65);
+        SS_LEFT, 18, 1408, 570, 65);
     ConfigControl(c, L"BUTTON", L"取消", BS_PUSHBUTTON | WS_TABSTOP, 416, 880, 80, 29, ButtonCancel);
     ConfigControl(c, L"BUTTON", L"保存", BS_DEFPUSHBUTTON | WS_TABSTOP, 508, 880, 80, 29, ButtonSave);
     HwndSetText(c->url, gSettings->translatePopupUrl);
@@ -1581,6 +1861,9 @@ static void CreateConfigControls(PopupConfig* c) {
     FillPopupFontCombo(c->fontFace);
     HwndSetText(c->fontSize,
                 fmt("%d", PopupClamp(gSettings->translatePopupFontSize, kPopupMinFontSize, kPopupMaxFontSize)));
+    HwndSetText(c->lineSpacing, fmt("%d%%", PopupLineSpacing()));
+    TranslatePopup* popup = FindPopupById(c->instance);
+    EnableWindow(c->lineSpacing, popup && popup->richEdit);
     HwndSetText(c->width, fmt("%d", PopupClamp(gSettings->translatePopupWidth, kPopupMinWidth, kPopupMaxWidth)));
     HwndSetText(c->height, fmt("%d", PopupClamp(gSettings->translatePopupHeight, kPopupMinHeight, kPopupMaxHeight)));
     HwndSetText(c->maxHeight, fmt("%d", PopupClamp(gSettings->translatePopupMaxHeight, 30, 90)));
@@ -1645,7 +1928,7 @@ static LRESULT CALLBACK ConfigWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
             return 0;
         }
         case WM_VSCROLL:
-            ScrollConfig(c, LOWORD(wp));
+            ScrollConfig(c, wp);
             return 0;
         case WM_MOUSEWHEEL: {
             int step = DpiScaleByDpi(DpiGetForHwnd(hwnd), kConfigScrollLine);
@@ -1722,7 +2005,7 @@ static void OpenPopupConfig(TranslatePopup* p) {
         SetForegroundWindow(p->config);
         return;
     }
-    RegisterPopupClass(kConfigClass, ConfigWndProc, 0);
+    RegisterPopupClass(kConfigClass, ConfigWndProc);
     Rect area = WorkAreaFor(HwndWindowRect(p->hwnd));
     int width = std::min(ScalePopup(p, 630), area.dx);
     int height = std::min(ScalePopup(p, 795), area.dy);
@@ -1748,20 +2031,19 @@ void ShowTranslatePopup(MainWindow* win) {
     Rect anchor;
     if (!textOnly || str::IsEmptyOrWhiteSpace(text) || !VisiblePopupAnchor(win, anchor)) return;
     TranslatePopup* p = FindPopup(win);
-    if (!p) p = NewPopup(win);
+    if (!p) p = NewPopup(win, anchor);
     if (!p) return;
     bool same = p->tab == tab && p->document == win->ctrl && str::Eq(p->source, text) && p->open;
+    UpdatePopupTheme(p);
     p->tab = tab;
     p->document = win->ctrl;
     p->anchor = anchor;
     p->anchorVisible = true;
     p->open = true;
-    UpdatePopupTheme(p);
     if (same) {
         PlacePopup(p);
         return;
     }
-    FitPopup(p, PopupFit::Exact);
     str::ReplaceWithCopy(&p->source, text);
     StartPopupJob(p);
 }
@@ -1815,6 +2097,9 @@ void DeleteTranslatePopup(MainWindow* win) {
     CancelPopupJob(p);
     DeleteTranslateArrow(p->arrow);
     p->arrow = nullptr;
+    OverlayScrollbar* scrollbar = p->scrollbar;
+    p->scrollbar = nullptr;
+    OverlayScrollbarDestroy(scrollbar);
     if (p->config) DestroyWindow(p->config);
     if (p->hwnd) DestroyWindow(p->hwnd);
     VecRemove(gPopups, p);
@@ -1880,6 +2165,8 @@ TempStr TranslatePopupStateTemp(MainWindow* win) {
             "bold=%d\nfontWeight=%d\n",
             p->fontSize, PopupLineHeight(p), p->autoSize ? 1 : 0, p->preferredWidth, p->preferredHeight, p->dpi,
             p->resizeCount, p->bold ? 1 : 0, (int)PopupTextMetrics(p).tmWeight));
+    int linePitch = p->richEdit && PopupLineCount(p) > 1 ? PopupLineY(p, 1) - PopupLineY(p, 0) : PopupLineStep(p);
+    state.Append(fmt("lineSpacing=%d\nlinePitch=%d\n", p->lineSpacing, linePitch));
     Rect arrow = TranslateArrowRect(p->arrow);
     Point tip = TranslateArrowTip(p->arrow);
     state.Append(

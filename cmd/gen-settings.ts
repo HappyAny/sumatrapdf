@@ -2334,6 +2334,7 @@ const globalPrefs: Field[] = [
     .ver("3.7"),
   field("TranslatePopupFont", Str, "Microsoft YaHei UI", "font family used only for translation text").ver("3.7"),
   field("TranslatePopupFontSize", Int, 11, "translation text size in points, from 8 to 32").ver("3.7"),
+  field("TranslatePopupLineSpacing", Int, 100, "translation line spacing as a whole percent, from 1 to 200").ver("3.7"),
   field("TranslatePopupBold", Bool, false, "use bold font weight for translation text").ver("3.7"),
   field("TranslatePopupAutoSize", Bool, true, "fit translation popup height to its text").ver("3.7"),
   field("TranslatePopupWidth", Int, 460, "translation reading or manual width in 96-DPI units, from 330 to 1600").ver(
@@ -2540,6 +2541,7 @@ const globalPrefsLayout = [
   "TranslatePopupCustomParams",
   "TranslatePopupFont",
   "TranslatePopupFontSize",
+  "TranslatePopupLineSpacing",
   "TranslatePopupBold",
   "TranslatePopupAutoSize",
   "TranslatePopupWidth",
